@@ -1,0 +1,96 @@
+name: Release
+
+# Publishes to npm. It fires on a version tag and on nothing else — not on a
+# push to `main`, not on a manual dispatch of an arbitrary ref. Publishing is
+# effectively irreversible, so the trigger is the narrowest one that works.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  # The same gate a pull request runs, by reference rather than by copy. A tag
+  # whose tree fails typecheck or tests never reaches the publish job.
+  gate:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: gate
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      # Required for the runner to mint an OIDC token. Load bearing once a
+      # trusted publisher is configured on npmjs.com; harmless before that.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          # Trusted publishing requires Node >= 22.14.0, so the publish job
+          # does not use the gate matrix's floor of 20.
+          node-version: '24'
+          # `registry-url` is what makes setup-node write the `.npmrc` that
+          # reads `NODE_AUTH_TOKEN`. Without it the secret below is silently
+          # ignored and the publish fails with `ENEEDAUTH` — which reads like a
+          # bad token and is not.
+          registry-url: 'https://registry.npmjs.org'
+          cache: npm
+
+      - name: Use an npm that understands trusted publishing
+        # 11.5.1 is npm's stated minimum for OIDC trusted publishing. The
+        # runner image's bundled npm is not guaranteed to be past it, and the
+        # failure if it is not is an auth error rather than a version error, so
+        # install explicitly rather than hoping.
+        run: npm install -g "npm@^11.5.1"
+
+      # Cheapest possible failure, so it goes first. Publishing 0.1.0 from a
+      # tag that reads v0.2.0 is not noticed until it is permanent.
+      - name: Check the tag matches package.json
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          pkg="v$(npm pkg get version | tr -d '"')"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::Tag ${tag} does not match package.json version ${pkg}. Fix one of them, delete the tag, and re-tag."
+            exit 1
+          fi
+          echo "Tag ${tag} matches package.json version ${pkg}."
+
+      - name: Install
+        run: npm ci
+
+      # Publish what this job built, not anything committed. `dist/` is
+      # gitignored, so the tarball's contents exist only because of this step
+      # and the `prepare` that `npm ci` already ran.
+      - name: Build
+        run: npm run build
+
+      # AUTHENTICATION — read this before changing it.
+      #
+      # Today this publishes with a granular access token in `NPM_TOKEN`.
+      # That is not a preference: npm cannot publish a package's *first*
+      # version over OIDC, because a trusted publisher can only be attached to
+      # a package that already exists on the registry (npm/cli#8544, open).
+      #
+      # Once `tf-import-blocks` exists and a trusted publisher is configured on
+      # npmjs.com, npm >= 11.5.1 prefers OIDC automatically and this file does
+      # not need to change — except for one trap. Deleting the repository
+      # secret does NOT remove the env var; it makes it an empty string, and
+      # npm treats an empty token as a token and fails rather than falling back
+      # to OIDC. So when you switch: delete the two `env:` lines below as well
+      # as the secret.
+      #
+      # `--provenance` is deliberately absent. Trusted publishing generates
+      # provenance without the flag, and with token auth the flag additionally
+      # requires the `repository` field to match this repo case-sensitively —
+      # a mismatch fails the publish outright rather than degrading. Add it in
+      # a later release, once there is a green run to compare against.
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish

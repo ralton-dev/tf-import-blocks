@@ -1,0 +1,59 @@
+name: CI
+
+# The gate. It runs on every pull request and on every push to `main`, and
+# `release.yml` calls it as a reusable workflow so a version tag cannot reach
+# the registry without passing exactly these steps. Calling it rather than
+# copying it is deliberate: two hand-maintained copies of a gate drift, and the
+# copy that drifts is always the one guarding the irreversible action.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      # Report both versions. A failure on the floor and a failure on current
+      # are different findings, and cancelling one hides which you have.
+      fail-fast: false
+      matrix:
+        # The floor declared in `engines`, and the current Active LTS. Testing
+        # the floor is the point — nothing else in this repo checks that the
+        # package actually runs on the oldest Node it advertises support for.
+        node: ['20', '24']
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # `npm ci` already runs `prepare`, which runs `build`, so `dist/` exists
+      # by the time this step starts. That was verified locally on 2026-08-08
+      # for this package as a *root* package, which is a different npm code
+      # path from the workspace case and had not been checked before.
+      #
+      # This step is redundant on purpose. It keeps the gate correct if that
+      # behaviour ever changes, it means a reader does not have to know the
+      # trivia to trust the file, and it proves the build that gets published
+      # actually builds. `dist/` is gitignored, so nothing here is committed.
+      - name: Build
+        run: npm run build
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
