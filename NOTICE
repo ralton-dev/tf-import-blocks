@@ -17,6 +17,11 @@ Copyright (c) IBM Corp. 2014-2026. Note that the Business Source License
 relicense of 2023 applied to Terraform core, not to the providers; the AWS
 provider remains MPL-2.0.
 
+Where the documentation was ambiguous or contradicted the provider's actual
+behaviour, the provider's own Go source was read instead — chiefly
+internal/service/ec2/vpc_security_group_rule.go and
+internal/service/ec2/vpc_security_group.go, in about a dozen places.
+
 No provider source code is copied into this package. What was taken is
 factual: which attributes compose each resource's import id, and in what
 order. The strings this package emits are paraphrases written against that
@@ -29,3 +34,27 @@ under other terms. Because no MPL-licensed file is included here, there is
 no licence conflict with MIT and nothing in this package is relicensed.
 This notice is attribution offered because it is honest, not a licence
 obligation being discharged.
+
+---
+
+Attribution: hashicorp/terraform
+
+The two state-file formats this package parses, and the validation rules
+governing the `import` block it emits, were checked against Terraform itself:
+
+    https://github.com/hashicorp/terraform
+
+specifically internal/states/statefile/version4.go (raw v4, including how a
+deposed object is nested inside the resource's own instances),
+internal/command/jsonstate/state.go (`terraform show -json`, where a deposed
+object is instead a separate entry at the same address), and
+internal/configs/import.go (a `provider` argument is rejected outright when
+the `to` address is inside a module — which is why this package emits a
+comment rather than a provider argument).
+
+Terraform core carries the Business Source License 1.1 from v1.6 onward;
+releases up to and including v1.5.x are MPL-2.0. Nothing turns on which,
+because no Terraform source is copied here either. A file format and a
+parser's acceptance rules are facts about artefacts this package must read
+and write correctly, and they were recorded as file-and-line citations so a
+future reader can re-check them instead of trusting this notice.

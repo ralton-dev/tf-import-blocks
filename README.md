@@ -22,14 +22,97 @@ adapters onto it that differ only in what they can feed it.
 Where a type supports both, the two **must produce the same string**.
 `test/golden.test.ts` asserts it.
 
-## Deliberately atlas-free
+Source comments, tests and fixtures here cite numbered design decisions —
+"decision 5", "decision 9". They are defined in
+[Design decisions](#design-decisions) at the foot of this file, numbered to
+match, and there is nowhere else to look them up.
 
-This package imports nothing from `@atlas/*` and has **no runtime dependencies**
-— not an HCL library, not a YAML parser. It is expected to move to its own
-repository, and lifting it out is `git mv packages/tf-import-blocks` plus a
-`package.json`. Do not "simplify" it by reaching into `@atlas/schema`; the
-structural `ScannedSubject` in `src/types.ts` exists precisely so the viewer's
-`ResourceRef` satisfies it without a converter.
+## Install
+
+```
+npm install tf-import-blocks
+```
+
+ESM only, Node 20 or newer, **no runtime dependencies**. TypeScript
+declarations ship with the package; there is no `@types/` to install.
+
+Moving resources between states — you have a state file, you want the `import`
+blocks that adopt its resources into another configuration:
+
+```ts
+import { readFileSync } from 'node:fs';
+import { emitBlocks, importsFromState } from 'tf-import-blocks';
+
+const state = JSON.parse(readFileSync('terraform.tfstate', 'utf8'));
+process.stdout.write(emitBlocks(importsFromState(state, 'terraform.tfstate')));
+```
+
+```hcl
+# account 111122223333 · region eu-west-1
+import {
+  to = aws_sqs_queue.orders
+  id = "https://sqs.eu-west-1.amazonaws.com/111122223333/orders"
+}
+```
+
+Note the id: `aws_sqs_queue` imports by queue **URL**, and the state's `id`
+attribute is the ARN. That gap, across ~250 resource types, is what this package
+is for.
+
+Adopting drift — you have a resource discovered by a scanner and no state entry
+for it at all, so there are no attributes to read:
+
+```ts
+import { emitBlock, resolveScanned } from 'tf-import-blocks';
+
+const block = emitBlock(
+  resolveScanned({
+    kind: 'sqs-queue',
+    id: 'arn:aws:sqs:eu-west-1:111122223333:orders',
+    region: 'eu-west-1',
+    accountId: '111122223333',
+    raw: {},
+  }),
+);
+```
+
+`resolveScanned` always answers — a kind with no rule produces a `# VERIFY`
+block rather than nothing (decision 5), so a bulk emit never silently loses a
+resource. `ResolvedImport.verified` tells you which you got.
+
+## Build and test
+
+```
+npm install     # `prepare` builds dist/ — the package is consumed built, never from src/
+npm run build   # tsc -p tsconfig.build.json  → dist/, with .d.ts and source maps
+npm run typecheck
+npm test
+```
+
+`dist/` is gitignored and rebuilt on every install. `exports` points at
+`dist/index.js` with no fallback to source, so a missing build fails loudly
+rather than quietly resolving TypeScript a consumer cannot compile.
+
+## Deliberately dependency-free
+
+This package has **no runtime dependencies** — not an HCL library, not a YAML
+parser. The emitter is string building (decision 13), and the rule table is
+data.
+
+It also imports nothing from `@atlas/*`, the private packages of the AWS estate
+scanner it was written inside and which several source comments still name
+(decision 1). That was never a courtesy: the structural `ScannedSubject` in
+`src/types.ts` exists precisely so that scanner's `ResourceRef` satisfies it
+without a converter, and any other producer's record can too. Do not
+"simplify" it by reaching into a caller's types.
+
+Decision 1 also predicted that lifting the package into its own repository would
+be `git mv` plus a `package.json`. **That was wrong**, and the record is worth
+keeping: it additionally took a separate build config (the monorepo base set
+`noEmit`), an `exports` repoint from `src/index.ts` to `dist/`, `tsx`,
+`typescript` and `@types/node` as explicit devDependencies rather than ones
+hoisted from a sibling, and a new test glob. The atlas-free half of the decision
+held perfectly; the "it's just a move" half did not.
 
 ## Only identifiers leave the state file
 
@@ -104,8 +187,16 @@ The two overlap in 105 types and neither contains the other: 31 rules are
 scanned-only, and the composite and attachment types that dominate a real state
 file are never drawn on a graph.
 
+"Kind" is the vocabulary of the estate scanner this package was written inside
+(see [Design decisions](#design-decisions), decision 1). That scanner is not
+public and the file paths below are unfollowable from here — they are kept
+because they name *where the number came from*, and a figure with no derivation
+is a figure nobody can re-check. If you are producing subjects from your own
+inventory rather than that one, `coveredKinds()` is the same set from inside the
+package and needs no external repository.
+
 **Derive this figure; do not count it by hand.** `kind` is assigned by four
-separate routes in `packages/viewer/src/data.ts` — the local `add()` helper, the
+separate routes in the viewer's `data.ts` — the local `add()` helper, the
 `globalKinds` table, three inline `all.push` calls for `zone`, `dxgw` and `s3`,
 and the `generic` literal. A regex over `add('…')` sees only the first: it finds
 117 kinds of which all but `ecr-registry` resolve, and so reports **99.1%
@@ -483,9 +574,9 @@ tidier than a real one. Known gaps, so nobody has to rediscover them:
   A `deposed` object is the old half of an interrupted create-before-destroy: it
   shares an address with the live instance and is scheduled for destruction, so
   importing it would both collide and adopt something Terraform is about to
-  delete. Note that `packages/scanner/src/terraform.ts` does **not** make this
-  distinction — the divergence is deliberate, because that path is matching
-  rather than importing.
+  delete. The estate scanner's own state reader (`scanner/src/terraform.ts`,
+  outside this repository) does **not** make this distinction — the divergence
+  is deliberate, because that path is matching rather than importing.
 - **Provider aliases** are mitigated by the `# account · region` comment, not
   solved. A state spanning two accounts is where a careless paste does damage.
 - **Non-ASCII and shell-hostile names** are escaped where decision 9 covers them
@@ -514,8 +605,14 @@ tidier than a real one. Known gaps, so nobody has to rediscover them:
 ## Tests
 
 ```
-npm test          # tsx --test "packages/*/test/**/*.test.ts", from the repo root
+npm test          # tsx --test "test/**/*.test.ts"
 ```
+
+`node --test` through `tsx`, with no test framework (decision 12). Two nearby
+invocations look equivalent and are not: `node --test --import tsx` does not
+resolve the specifier, and `node --import tsx/esm --test` exits 1 on a
+`{ todo: true }` failure, which would defeat a deliberately-red pin. Re-verify
+that a todo failure still exits 0 if you change it.
 
 | file | what it pins |
 | --- | --- |
@@ -524,3 +621,189 @@ npm test          # tsx --test "packages/*/test/**/*.test.ts", from the repo roo
 | `test/scanned-network.test.ts`, `test/scanned-workload.test.ts` | every `fromScanned` resolver |
 | `test/scanned-expand.test.ts` | expansion: the fan-out rule, the provider notes, that the state path never expands, and that every declared expander survives the registry merge |
 | `test/golden.test.ts` | the whole thing, both paths, and that they agree |
+
+## Design decisions
+
+Source comments, tests and fixtures in this package cite these **by number** —
+64 citations across `src/`, `test/` and this file. They were taken while the
+package was being built, and the numbering here matches the citations exactly:
+`decision 9` in `emit.ts` is item 9 below.
+
+They are not house style. Most of them encode a failure that is invisible at the
+point you would make it and expensive later, in somebody else's `terraform
+plan`. **Decisions 3 and 5 are the two a contributor is most likely to undo by
+accident**, so they are written at length.
+
+1. **Standalone, and free of its birth repository's types.** The package was
+   written inside a private AWS estate scanner whose packages are named
+   `@atlas/*`, and imports nothing from them — a constraint the source comments
+   still name. See [Deliberately dependency-free](#deliberately-dependency-free),
+   including the half of this decision that turned out to be wrong.
+
+2. **A subject is structural, and declared here.** `ScannedSubject` is
+   `{ kind, id, arn?, name?, region, accountId, raw }` (`src/types.ts`). A
+   producer satisfies it by *shape* — the scanner's `ResourceRef` does, with no
+   converter on either side — and the package never imports a producer's types.
+   That is what keeps decision 1 true, and it is why your own inventory records
+   can drive this package as long as they can be described that way.
+
+3. **Emit the `id = "…"` form only. Read ids off the `id` block, never the
+   `identity` block.**
+
+   Terraform's `import` block has taken a string `id` since 1.5. The
+   `identity = { … }` form needs Terraform **1.12 or newer** *and* a provider
+   that publishes a resource identity schema for that specific type; coverage
+   across the AWS provider is uneven, so supporting it would mean tracking, per
+   type, whether an identity schema exists — a second rule table that goes stale
+   silently. This package emits `id` and nothing else. Do not "upgrade" it
+   without asking.
+
+   The consequence is a trap for anyone adding or re-verifying a rule, and it is
+   the reason so many source comments repeat it. **The AWS provider's
+   documentation pages now print the `identity = { … }` example first**, above
+   the `id = "…"` example. The first `import {` block your eye lands on is
+   therefore the wrong one. Every id format in `src/rules/` was taken from the
+   `id = "…"` block further down the page, or from the `terraform import`
+   console line beneath it. Copying the top stanza gives you an identity map for
+   a consumer on Terraform 1.5 — it will not parse — and, worse, an identity
+   map's *attribute set* is often not the same information as the id string, so
+   the mistake does not always announce itself as a syntax error. **Scroll past
+   the first `import {`.**
+
+4. **Rule coverage is the union of two tiers, and neither contains the other.**
+   Tier A is the kinds a graph viewer can build, needed to answer "what do I
+   paste for this thing I can see?". Tier B is the composite and attachment
+   types that dominate a real state file and are never drawn. The two overlap in
+   105 terraform types; 31 rules are scanned-only. A "complete" table that
+   covers one tier is half a table.
+
+5. **A guard returns `undefined` and earns a `# VERIFY`. It never returns a
+   plausible wrong answer.**
+
+   Nothing is ever dropped. A type with no rule still produces a block, built
+   from the state's own `id` and flagged `# VERIFY: no rule for <type> — import
+   id may not be the state id`. A rule that *exists* but cannot compute an id
+   from the fields it was given does the same thing: the resolver returns
+   `undefined`, and the block says so. `ResolvedImport.verified` is how a caller
+   tells the two apart.
+
+   The reasoning is asymmetric, and it is the whole reason this package exists.
+   Three outcomes are possible for a resource this code is unsure about:
+
+   - **Dropped silently** — the worst. During a state move, a resource missing
+     from the import blocks is a resource the new configuration does not manage
+     and the old state no longer protects. You find out when something destroys
+     it.
+   - **Wrong, and flagged** — recoverable in seconds. `# VERIFY` puts the doubt
+     in front of the person who can settle it, on the line above the id.
+   - **Wrong, and unflagged** — worse than both. It compiles, it renders, it
+     copies to the clipboard, and it fails hours later inside somebody else's
+     `terraform plan`. Or it succeeds, against the wrong resource.
+
+   **So if you are reading this because a guard returned `undefined` and you
+   wanted the id anyway: do not turn the guard into a passthrough.** The worked
+   example is `aws_eip`. EC2-Classic elastic IPs carry a bare IP address as
+   their id, and `aws_eip` imports by *allocation* id — so a bare-IP subject
+   resolves to no rule, deliberately. `id = "203.0.113.5"` is not a near miss
+   that a user can fix up; it is an import that fails, or adopts something else.
+   The correct fix is a rule that can compute the right id, or the `# VERIFY`.
+   The same holds in a UI: show the flagged block and say why, rather than
+   hiding the section and looking tidy.
+
+6. **Only identifiers leave the state file.** Rules may *read* any attribute to
+   compute an import id. What is written out is the computed id, the Terraform
+   address, and the account and region the resource's own ARN disclosed —
+   nothing else. No attribute value is ever copied into output unless it *is*
+   the import id. Reading a state to generate import blocks does not put state
+   values in the generated `.tf`, and that property is worth preserving on
+   purpose: state files hold secrets.
+
+7. **Generated `.tf` goes where the caller says.** The package returns strings
+   and writes no files. There is no default output path and nothing is ever
+   written beside the state file it read — import blocks belong in the *target*
+   configuration's repository, not next to the source of truth you are moving
+   away from.
+
+8. **A synthesised address is a suggestion, and collisions are deduped.** From a
+   state file the address is authoritative; it came from the state. From a
+   scanned resource there is no address, so `<tf_type>.<sanitised name or id>`
+   is synthesised and `addressIsSuggestion` is set — a UI should say it is a
+   suggestion to rename. Sanitising follows HCL: identifiers match
+   `[A-Za-z_][A-Za-z0-9_-]*`, so invalid characters become `_` and a result
+   starting with a digit gets an `r_` prefix. Within a single emit, collisions
+   take `_2`, `_3` — two unmanaged security groups both named `default` must not
+   both become `aws_security_group.default`, because the second one silently
+   replaces the first in the file you paste.
+
+9. **HCL escaping is the emitter's job and is not optional.** `\` → `\\`,
+   `"` → `\"`, `${` → `$${`, `%{` → `%%{`. An unescaped `${` is *interpolated*
+   by Terraform at parse time, so an id containing one becomes a different id or
+   an error. This is not hypothetical tidiness: S3 keys, tag values and Route 53
+   record names all carry these characters in the wild.
+
+10. **No `provider =` argument. A `# account · region` comment instead.** We
+    cannot know a caller's provider alias names, and importing into the wrong
+    provider is silent and expensive. Every block therefore carries
+    `# account <id> · region <region>` above it. This is also the only advice
+    that is correct in both positions: Terraform *rejects* a `provider` argument
+    outright when the `to` address is inside a module, and directs you to the
+    module block's `providers` map instead — so an emitted `provider =` would be
+    wrong or unusable depending on where the resource lands.
+
+11. **Data sources and non-`aws_` resources are skipped.** A `data` block has no
+    import, and a resource from another provider is outside this package's rule
+    table. Both are common in a real state, and both are counted rather than
+    ignored, so a caller can reconcile the block count against the state.
+
+12. **The test runner is `node --test` through `tsx`.** No test framework, no
+    assertion library, no new dependency in the runtime graph. Verified
+    behaviour that is load bearing: a failing assertion under `{ todo: true }`
+    prints the full diff and still exits 0, which is what lets a deliberately
+    red pin sit in a green tree. See [Tests](#tests) for the two nearby
+    invocations that break it.
+
+13. **No runtime dependencies. Not an HCL library, not a YAML parser.** The
+    emitter is string building, and the rule table is data. This is a
+    constraint on the package, not an accident of its current size.
+
+14. **The package is additive: it never asked the scanner for a new field.** It
+    was built as a second, independent path beside an existing Terraform
+    matching feature and changed nothing about it. In practice the citations of
+    this decision all mean one thing — **a rule may not require a snapshot field
+    that is not already collected**, because adopting drift must not have
+    "re-scan the whole estate" as a prerequisite. `aws_sqs_queue` is the
+    positive case: the queue URL is *derived* from the ARN the scanner already
+    stores. The FSx-backed DataSync locations are the negative one: their id
+    needs an ARN nobody collected and which cannot be rebuilt (the provider's
+    own example puts the FSx file system in a different account), so the rule
+    declines rather than guessing — decision 5 again.
+
+## Provenance, licence and attribution
+
+MIT, Copyright (c) 2026 Ben Ralton. See `LICENSE`.
+
+The per-type import-id rule table in `src/rules/` was derived by reading the
+"Import" section of roughly 250 resource documentation pages in
+[`hashicorp/terraform-provider-aws`](https://github.com/hashicorp/terraform-provider-aws),
+and in about a dozen cases the provider's Go source where the documentation was
+ambiguous or wrong — `internal/service/ec2/vpc_security_group_rule.go` and
+`internal/service/ec2/vpc_security_group.go` most of all. The state-file
+formats and the `import` block's own validation rules were checked against
+[`hashicorp/terraform`](https://github.com/hashicorp/terraform) itself
+(`internal/states/statefile/version4.go`, `internal/command/jsonstate/state.go`,
+`internal/configs/import.go`). Individual rules and comments cite the file and
+line they were checked against.
+
+The AWS provider is **MPL-2.0, Copyright (c) IBM Corp. 2014-2026**. The Business
+Source License relicense of 2023 applied to Terraform *core*, not to the
+providers. **No source from either project is copied into this package.** What
+was taken is factual — which attributes compose each resource's import id and in
+what order, and how a v4 state file spells "deposed" — and the strings emitted
+here are paraphrases, several of which deliberately disagree with a naive
+reading of the documentation.
+
+MPL-2.0 is file-level copyleft and §3.3 expressly permits distributing a Larger
+Work under other terms; since no MPL-licensed file is included here, there is no
+conflict with MIT and **nothing in this package is relicensed**. This section is
+attribution offered because it is honest, not a licence obligation being
+discharged. `NOTICE` carries the same statement for redistributors.

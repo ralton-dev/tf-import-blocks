@@ -1,9 +1,37 @@
 {
   "name": "tf-import-blocks",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
   "description": "Terraform import-block generation from a state file or from a scanned resource, driven by a per-type import-id rule table",
+  "keywords": [
+    "terraform",
+    "import",
+    "import-block",
+    "tfstate",
+    "terraform-state",
+    "aws",
+    "hcl",
+    "iac",
+    "drift",
+    "state-migration"
+  ],
+  "license": "MIT",
+  "author": "Ben Ralton",
+  "homepage": "https://github.com/ralton-dev/tf-import-blocks#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ralton-dev/tf-import-blocks.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ralton-dev/tf-import-blocks/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -14,7 +42,8 @@
   "files": [
     "dist",
     "src",
-    "test/fixtures"
+    "test/fixtures",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
