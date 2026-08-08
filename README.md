@@ -1,10 +1,26 @@
 # tf-import-blocks
 
-Terraform `import` blocks for resources you have but your configuration does not.
+Terraform `import` blocks for the resources in a Terraform state file, each with
+the id that type actually imports by — frequently not the id sitting in the
+state.
 
 ```
 npx tf-import-blocks prod.tfstate > imports.tf
 ```
+
+**It writes `import` blocks and nothing else. It does not generate resource
+configuration,** and it does not go looking in your cloud account for resources
+you have not already got in state. The input is a state file that exists
+already: a raw `*.tfstate`, `terraform state pull` output, or `terraform show
+-json` output.
+
+That is the division of labour Terraform itself documents. Its adoption workflow
+is to write the `import` blocks first, then run `terraform plan
+-generate-config-out=generated.tf`, which reads those blocks and writes the
+`resource` bodies to match. What this package produces is that flag's input —
+the half Terraform leaves you to write yourself, across the ~250 types where the
+right id is not the one in the state. (Terraform still labels configuration
+generation experimental, and refuses to write to a file that already exists.)
 
 **A resource's Terraform identity is a `(type, import-id)` pair produced by a
 per-type rule — not its AWS id.** `aws_sqs_queue` imports by queue URL,

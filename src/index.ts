@@ -1,6 +1,14 @@
 /**
- * `tf-import-blocks` — Terraform `import` blocks for resources you have but
- * your configuration does not.
+ * `tf-import-blocks` — Terraform `import` blocks for the resources in a
+ * Terraform state file, or for a record from an inventory this package does not
+ * itself produce.
+ *
+ * It emits `import` blocks and nothing else: it generates no resource
+ * configuration, and it discovers nothing on its own — the state file is an
+ * input, never something this code goes and fetches. That is the division of
+ * labour Terraform documents: write the `import` blocks, then run `terraform
+ * plan -generate-config-out=generated.tf` and Terraform writes the `resource`
+ * bodies to match. What this package produces is that flag's input.
  *
  * A resource's Terraform identity is a `(type, import-id)` pair produced by a
  * per-type rule, *not* its AWS id. `aws_sqs_queue` imports by queue URL,
