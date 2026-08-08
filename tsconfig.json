@@ -1,6 +1,31 @@
+// These options were inherited from a monorepo-root `tsconfig.base.json` until
+// this package became its own repository. There is nothing two directories up
+// any more, so the base is folded in here verbatim rather than extended.
+//
+// `noUncheckedIndexedAccess` is the one to be careful with. Dropping it does
+// not break the build — it *weakens* the typechecker, silently, and everything
+// still compiles. The rule table indexes records by terraform type and the
+// state parser walks arrays of instances, so without it a missing key types as
+// present and a guard that this package exists to enforce becomes a
+// passthrough. If you are tempted to remove it to make an error go away, the
+// error is the point.
 {
-  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+
+    // Typechecking only. `tsconfig.build.json` turns this off for itself; it is
+    // the sole place in the repo that emits.
+    "noEmit": true,
+
     "module": "ESNext",
     "moduleResolution": "bundler",
     "types": ["node"]

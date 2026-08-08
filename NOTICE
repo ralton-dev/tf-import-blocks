@@ -1,0 +1,31 @@
+tf-import-blocks
+Copyright (c) 2026 Ben Ralton
+Licensed under the MIT License. See LICENSE.
+
+---
+
+Attribution: hashicorp/terraform-provider-aws
+
+The per-type import-id rule table in src/rules/ was derived by reading the
+"Import" section of roughly 250 resource documentation pages in the AWS
+provider:
+
+    https://github.com/hashicorp/terraform-provider-aws
+
+That project is licensed under the Mozilla Public License 2.0,
+Copyright (c) IBM Corp. 2014-2026. Note that the Business Source License
+relicense of 2023 applied to Terraform core, not to the providers; the AWS
+provider remains MPL-2.0.
+
+No provider source code is copied into this package. What was taken is
+factual: which attributes compose each resource's import id, and in what
+order. The strings this package emits are paraphrases written against that
+documentation, and several of them disagree with a naive reading of it —
+see the rule comments, which cite the file and line in the provider they
+were checked against.
+
+MPL-2.0 is file-level copyleft, and §3.3 permits distributing a Larger Work
+under other terms. Because no MPL-licensed file is included here, there is
+no licence conflict with MIT and nothing in this package is relicensed.
+This notice is attribution offered because it is honest, not a licence
+obligation being discharged.

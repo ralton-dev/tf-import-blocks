@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Build output. `dist/` is generated, never edited, and rebuilt by the
+# `prepare` script on every `npm install` — committing it would add a copy
+# that nothing here ever verifies is current.
+dist/
+*.tsbuildinfo
+
+# OS / editor / session-local tooling
+.DS_Store
+*.local
+.claude/
+
+# Logs
+npm-debug.log*
+*.log
+
+# Raw Terraform state must never land in the repo: it can contain secrets, and
+# this package's whole job is reading state files.
+*.tfstate
+*.tfstate.backup
