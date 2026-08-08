@@ -76,10 +76,7 @@
  * ---------------------------------------------------------------------------
  */
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
 
 import {
   emitBlocks,
@@ -88,22 +85,11 @@ import {
   type ResolvedImport,
   type ScannedSubject,
 } from '../src/index.js';
-
-const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
-
-const read = (name: string): string => readFileSync(path.join(FIXTURES, name), 'utf8');
-
-/**
- * `##` lines in the golden are annotations — provider doc citations and notes
- * for whoever reads it next — and are not part of the expected output. Nothing
- * else is touched: blank lines and single-`#` comments are compared.
- */
-export function stripAnnotations(text: string): string {
-  return text
-    .split('\n')
-    .filter((line) => !line.startsWith('##'))
-    .join('\n');
-}
+// `stripAnnotations` used to be defined and exported here. It moved to a
+// non-test module when `cli.test.ts` began asserting the same golden through
+// the built binary: importing it from a `*.test.ts` would have re-registered
+// this file's test inside that one's process and run it twice.
+import { readFixture as read, stripAnnotations } from './golden-file.js';
 
 interface Block {
   readonly address: string;

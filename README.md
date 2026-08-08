@@ -2,6 +2,10 @@
 
 Terraform `import` blocks for resources you have but your configuration does not.
 
+```
+npx tf-import-blocks prod.tfstate > imports.tf
+```
+
 **A resource's Terraform identity is a `(type, import-id)` pair produced by a
 per-type rule — not its AWS id.** `aws_sqs_queue` imports by queue URL,
 `aws_lambda_function` by function name, `aws_ecs_service` by
@@ -10,14 +14,20 @@ is never a valid import id at all. Enough types work by accident that a naive
 "use the `id`" generator looks correct on a demo and silently emits garbage for
 the composite and attachment resources that make up the bulk of a real state.
 
-The rule table in `src/rules/` is this package's asset. The entry points are thin
-adapters onto it that differ only in what they can feed it.
+The rule table in `src/rules/` is this package's asset. Everything else is a thin
+adapter onto it, and the adapters differ only in what they can feed it.
 
 | entry point | source | what it has |
 | --- | --- | --- |
+| `tf-import-blocks <statefile>…` (the command) | a Terraform state file | the row below, plus a summary and exit codes |
 | `importsFromState(json, label)` | a Terraform state file | real attributes, so composite ids are computable exactly |
-| `resolveScanned(subject)` | a scanned AWS resource | only a snapshot, so composite ids must be reconstructed |
+| `resolveScanned(subject)` | a record from some *other* inventory | only a snapshot, so composite ids must be reconstructed — see [who that is for](#adopting-drift-from-an-inventory--the-scanned-path) |
 | `resolveScannedExpanded(subject)` | the same | plus the terraform resources the snapshot keeps *inside* that one — see [Nested resources](#nested-resources--one-scanned-parent-several-import-blocks) |
+
+**A state file is the general case and the first three rows are the whole of it.**
+The scanned path exists for callers who have an inventory instead of a state, and
+it needs input in a particular vocabulary; that half is scoped and labelled where
+it starts.
 
 Where a type supports both, the two **must produce the same string**.
 `test/golden.test.ts` asserts it.
@@ -27,25 +37,15 @@ Source comments, tests and fixtures here cite numbered design decisions —
 [Design decisions](#design-decisions) at the foot of this file, numbered to
 match, and there is nowhere else to look them up.
 
-## Install
+## The command
 
 ```
-npm install tf-import-blocks
+terraform state pull > prod.tfstate
+npx tf-import-blocks prod.tfstate > imports.tf
 ```
 
-ESM only, Node 20 or newer, **no runtime dependencies**. TypeScript
-declarations ship with the package; there is no `@types/` to install.
-
-Moving resources between states — you have a state file, you want the `import`
-blocks that adopt its resources into another configuration:
-
-```ts
-import { readFileSync } from 'node:fs';
-import { emitBlocks, importsFromState } from 'tf-import-blocks';
-
-const state = JSON.parse(readFileSync('terraform.tfstate', 'utf8'));
-process.stdout.write(emitBlocks(importsFromState(state, 'terraform.tfstate')));
-```
+One `import` block per resource in the state file, so a subtree can be adopted
+into another configuration:
 
 ```hcl
 # account 111122223333 · region eu-west-1
@@ -59,26 +59,76 @@ Note the id: `aws_sqs_queue` imports by queue **URL**, and the state's `id`
 attribute is the ARN. That gap, across ~250 resource types, is what this package
 is for.
 
-Adopting drift — you have a resource discovered by a scanner and no state entry
-for it at all, so there are no attributes to read:
+Input is a raw `*.tfstate`, `terraform state pull` output, or `terraform show
+-json` output — the format is detected, not declared. Several files are merged
+into one document sorted by address, so re-running produces a diff rather than a
+reshuffle. No AWS credentials, no network, no config file: this reads a local
+file and writes text.
 
-```ts
-import { emitBlock, resolveScanned } from 'tf-import-blocks';
+**stdout carries HCL and nothing else**, so `> imports.tf` is always safe. The
+summary goes to stderr, and reports only counts, terraform types and Terraform
+addresses — never an attribute value, and not even an import id, because stderr
+is frequently the thing that ends up pasted into a ticket:
 
-const block = emitBlock(
-  resolveScanned({
-    kind: 'sqs-queue',
-    id: 'arn:aws:sqs:eu-west-1:111122223333:orders',
-    region: 'eu-west-1',
-    accountId: '111122223333',
-    raw: {},
-  }),
-);
+```
+tf-import-blocks: 15 blocks from 1 state file
+  14 resolved by a rule
+  1 fell back to the state id, flagged # VERIFY
+    no rule: aws_s3_object
+  skipped: 1 deposed instance, 1 data source, 1 non-aws resource
 ```
 
-`resolveScanned` always answers — a kind with no rule produces a `# VERIFY`
-block rather than nothing (decision 5), so a bulk emit never silently loses a
-resource. `ResolvedImport.verified` tells you which you got.
+| flag | |
+| --- | --- |
+| `--out <file>` | write the HCL to a file instead of stdout, creating the parent directory. stdout then gets nothing at all — the summary stays on stderr, so the rule above holds with no exceptions |
+| `--filter <prefix>` | emit only addresses starting with this prefix. `--filter module.net.` is how you move one subtree out of a large state; the summary counts what was withheld |
+| `-h`, `--help` | the full usage, on stdout |
+| `-v`, `--version` | the version, on stdout, and nothing else |
+
+| exit | |
+| --- | --- |
+| `0` | blocks were generated — **including** blocks flagged `# VERIFY`, which are a normal outcome and the whole point of flagging them |
+| `1` | usage error: an unknown flag, or no state file given |
+| `2` | a state file could not be read, was not JSON, or was not a state file. Nothing reaches stdout, so a failed batch cannot leave a half-written `imports.tf` |
+| `3` | blocks were generated and written, but two state files supplied the same Terraform address, so the output is not valid HCL until one is removed. The addresses are listed on stderr. It is a non-zero exit rather than a warning because that is what makes `set -e` and CI notice |
+
+## Install
+
+```
+npx tf-import-blocks …            # no install at all
+npm install -g tf-import-blocks   # the command, on your PATH
+npm install tf-import-blocks      # the library, in a project
+```
+
+ESM only, Node 20 or newer, **no runtime dependencies** — not for the library
+and not for the command, which parses its own arguments with `node:util`.
+TypeScript declarations ship with the package; there is no `@types/` to install.
+
+## The library
+
+The command is a thin wrapper around `importsFromState`, and that function is
+the supported way to do the same thing from code:
+
+```ts
+import { readFileSync } from 'node:fs';
+import { emitBlocks, importsFromState } from 'tf-import-blocks';
+
+const state = JSON.parse(readFileSync('terraform.tfstate', 'utf8'));
+process.stdout.write(emitBlocks(importsFromState(state, 'terraform.tfstate')));
+```
+
+The second argument is a label used in error messages only — the path you would
+want to see named if the file turns out not to be a state file.
+
+There is a second entry point, `resolveScanned`, for callers who have an
+inventory record rather than a state file. It needs a `kind` from a specific
+vocabulary and is **not** what the command uses; see
+[Adopting drift from an inventory](#adopting-drift-from-an-inventory--the-scanned-path)
+for what produces that input and whether you have it.
+
+Only `dist/index.js` is exported. The command's own modules (`generate.ts`,
+`cli.ts`) ship in the tarball but are not reachable through `exports`, so the
+CLI's shape can change without a major version while the library's cannot.
 
 ## Build and test
 
@@ -86,12 +136,18 @@ resource. `ResolvedImport.verified` tells you which you got.
 npm install     # `prepare` builds dist/ — the package is consumed built, never from src/
 npm run build   # tsc -p tsconfig.build.json  → dist/, with .d.ts and source maps
 npm run typecheck
-npm test
+npm test        # `pretest` rebuilds first — see below
 ```
 
 `dist/` is gitignored and rebuilt on every install. `exports` points at
 `dist/index.js` with no fallback to source, so a missing build fails loudly
 rather than quietly resolving TypeScript a consumer cannot compile.
+
+`npm test` builds before it runs, via `pretest`. That is not tidiness:
+`test/cli.test.ts` spawns `dist/cli.js` as a child process, which is the only
+way to observe a lost shebang or a summary line escaping onto stdout — and
+against a stale `dist/` it would pass while testing last week's code. A test
+that is quietly wrong is worse than one that is slow.
 
 ## Deliberately dependency-free
 
@@ -159,9 +215,10 @@ load-bearing:
   own `SetId` *is* that attribute — `sqs/queue.go` is `SetId(QueueUrl)` and
   `lambda/function.go` is `SetId(functionName)`, so on the state path plain
   passthrough was already right for both. Naming `url` and `function_name`
-  documents *why* it works rather than leaving it to luck. (On the **scanned**
-  path those two are wrong, because atlas stores the ARN. That is the other
-  half of the rule table's job.)
+  documents *why* it works rather than leaving it to luck. (On the
+  [scanned path](#adopting-drift-from-an-inventory--the-scanned-path) those two
+  are wrong, because an inventory records the ARN rather than the URL or the
+  name. That is the other half of the rule table's job.)
 - **Composite imports** compose strictly and return `undefined` when a part is
   missing — **no `id` fallback at all**. For `aws_route`,
   `aws_security_group_rule`, `aws_ecs_service` and the `aws_wafv2_*` family the
@@ -177,190 +234,6 @@ Three attribute readers exist for reasons worth knowing before you write a rule:
 | `scalar()` | `from_port` is a number and `egress` a boolean, and both are parts of documented ids. `0` and `false` are values, not absences |
 | `text()` | `str()` rejects `''`, and a Route 53 apex record imports as `Z4KAPRWWNC7JR__NS` — double underscore and all |
 | `bareName()` | `aws_ecs_service.cluster` holds the cluster **ARN** while the import id wants `prod-cluster`. Applied to IAM attachment principals for the same reason |
-
-## Coverage — atlas kinds (from a scanned resource)
-
-**136 of the 139 `kind` values the viewer can build resolve to a rule.** This is
-the figure the details panel and the bulk copy depend on, and it is a different
-question from the terraform-type count below rather than a restatement of it.
-The two overlap in 105 types and neither contains the other: 31 rules are
-scanned-only, and the composite and attachment types that dominate a real state
-file are never drawn on a graph.
-
-"Kind" is the vocabulary of the estate scanner this package was written inside
-(see [Design decisions](#design-decisions), decision 1). That scanner is not
-public and the file paths below are unfollowable from here — they are kept
-because they name *where the number came from*, and a figure with no derivation
-is a figure nobody can re-check. If you are producing subjects from your own
-inventory rather than that one, `coveredKinds()` is the same set from inside the
-package and needs no external repository.
-
-**Derive this figure; do not count it by hand.** `kind` is assigned by four
-separate routes in the viewer's `data.ts` — the local `add()` helper, the
-`globalKinds` table, three inline `all.push` calls for `zone`, `dxgw` and `s3`,
-and the `generic` literal. A regex over `add('…')` sees only the first: it finds
-117 kinds of which all but `ecr-registry` resolve, and so reports **99.1%
-against a true 97.8%** — flattering, because two of the three unresolved kinds
-are assigned by routes it cannot see. (117 + 21 from `globalKinds` + 4 inline
-literals = 142, less the three WAF kinds the viewer builds both regionally and
-globally = 139.) The reliable method executes the builder rather than reading
-it, and so cannot miss a route:
-
-1. Fill every collection returned by `emptyRegionSnapshot()` and `emptyGlobal()`
-   with one item.
-2. Run the viewer's `buildIndex()` and take the distinct `kind` off the refs it
-   produced.
-3. Ask `ruleForKind()` about each; `coveredKinds()` is the same set from the
-   other end.
-
-Checked in both directions — `coveredKinds()` names no kind the viewer cannot
-build, so a typo in a rule's `kinds` array cannot inflate the count.
-
-### Kinds that resolve to nothing — 3
-
-Each is deliberate. None is "we could not work it out", and all three still emit
-a block — commented out, naming the kind — so a bulk copy cannot lose the
-resource silently.
-
-| kind | why there is no rule | what to do instead |
-| --- | --- | --- |
-| `generic` | the Resource Groups Tagging API and Cloud Control sweeps (`collect/generic.ts`, `collect/cloudcontrol.ts`) merge into one collection spanning every service in the estate — the kind is a catch-all for hundreds of AWS types, so no single terraform type can be named for it | the block carries the ARN it was discovered by; read the service and resource out of that and use the rule for its real type |
-| `ecr-registry` | `r/ecr_registry.html.markdown` is a **404**: the registry is an account-level singleton and the provider has no resource for it, only configuration attached to it | its three sub-resources do import, all three by the registry id — which is your account id: `aws_ecr_registry_policy`, `aws_ecr_registry_scanning_configuration`, `aws_ecr_replication_configuration` |
-| `sso-instance` | `r/ssoadmin_instance.html.markdown` is a **404**: Identity Center instances are exposed as a **data source** only, `d/ssoadmin_instances` | reference it with `data "aws_ssoadmin_instances"` and feed its ARN into the resources that take `instance_arn` — `aws_ssoadmin_permission_set` and the two `aws_ssoadmin_*_attachment` types are covered below |
-
-`generic` has no entry in a rule module at all; the other two are named in
-`NO_RULE_KINDS` in `rules/scanned-workload.ts`, and
-`test/scanned-workload.test.ts` asserts that list is exactly those two.
-
-### The terraform type is chosen per resource — 8 kinds
-
-`ImportRule.type` is a constant, and for these eight it is the merge key and
-nothing else — one atlas kind covers several provider resources and a collected
-field decides which. `typeFromScanned` reads that field and is **authoritative
-including when it answers `undefined`**, at which point `from-scanned.ts` emits
-no type at all rather than the dominant one.
-
-| kind | discriminator | candidates | when it cannot tell |
-| --- | --- | --- | --- |
-| `apigw` | `protocolType` | `aws_api_gateway_rest_api` (REST), `aws_apigatewayv2_api` (HTTP, WEBSOCKET) | id survives — both import by the bare API id |
-| `apigw-vpc-link` | `version` | `aws_api_gateway_vpc_link` (v1), `aws_apigatewayv2_vpc_link` (v2) | id survives — both import by the bare link id |
-| `apigw-domain` | `endpointTypes` | `aws_api_gateway_domain_name` (EDGE, PRIVATE), `aws_apigatewayv2_domain_name` | `REGIONAL` is valid on both, so the type is unknowable; the id (the domain name) survives. With **no** `endpointTypes` at all a private domain cannot be ruled out and the id is flagged too |
-| `lb` | `lbType` | `aws_lb` (application, network, gateway), `aws_elb` (classic) | **id flagged as well** — `aws_lb` imports by ARN and `aws_elb` by name, so the variants disagree about the id, not just the type |
-| `tgw-attachment` | `resourceType` | `aws_ec2_transit_gateway_vpc_attachment`, `_peering_attachment`, `aws_ec2_transit_gateway_connect` | id survives. `vpn` and `direct-connect-gateway` attachments have no attachment resource at all — they are created by `aws_vpn_connection` and `aws_dx_gateway_association` — so they decline here and stay declined |
-| `dx-vif` | `vifType` | `aws_dx_private_virtual_interface`, `_public_`, `_transit_` | id survives — all three import by the same `dxvif-…` |
-| `fsx` | `fileSystemType` | `aws_fsx_lustre_file_system`, `_windows_`, `_ontap_`, `_openzfs_` | id survives — all four import by the same `fs-…` |
-| `datasync-location` | `locationType` | eleven `aws_datasync_location_*` types | **id flagged as well** — the eleven do not share one id form |
-
-**The type and the id fail independently, and two kinds fail the other way
-round** — type known, id not:
-
-- `apigw-domain` with `PRIVATE` resolves to `aws_api_gateway_domain_name`, but a
-  private custom domain imports by `<name>/<domain_name_id>` and `domainNameId`
-  is not collected. Real `to =`, flagged id.
-- The four FSx-backed `datasync-location` types resolve exactly, but import by
-  `<location-arn>#<fsx-arn>` and the FSx ARN is not in the snapshot
-  (`collect/datasync.ts` keeps only `SecurityGroupArns` from
-  `DescribeLocationFsx*`). Nor can it be rebuilt from `locationUri`: the doc
-  example puts the file system in a *different account*.
-
-### Reading a commented-out block
-
-A block with no type cannot be pasted, so the emitter comments the whole stanza
-out rather than guessing at `to =`. This is what one looks like, and the comment
-above it is the whole explanation — including whether the id is still good:
-
-```hcl
-# account 111122223333 · region eu-west-1
-# VERIFY: the terraform resource type could not be determined — atlas kind "apigw-domain" covers several provider resources and the scanned fields do not identify one for this resource, so the block below is commented out. Candidates: aws_api_gateway_domain_name, aws_apigatewayv2_domain_name. The id below is right whichever of those it is
-# import {
-#   to = <replace with the terraform type and a name, e.g. aws_vpc.main>
-#   id = "dev.example.com"
-# }
-```
-
-Pick the candidate from the console or from what you know of the resource, put
-it in `to =` with a name of your choosing, and uncomment. Where the id is also
-flagged — the `lb` and `datasync-location` rows above — a second `VERIFY` line
-says so, and that one you have to look up.
-
-## Nested resources — one scanned parent, several import blocks
-
-**A scanned resource is not always one terraform resource.** The snapshot nests
-some relationships inside the resource they belong to — `SecurityGroup.ingress`
-and `.egress` are the live case — while Terraform models each as a resource of
-its own with its own import id. Nothing draws them on a graph, so they had
-nothing to hang an import block on, and the result was a half-adoption that
-looks complete: an `aws_security_group` block you can paste, and rules Terraform
-still does not manage.
-
-`resolveScannedExpanded(subject)` returns `{ parent, children }`;
-`resolveScannedManyExpanded(subjects)` flattens for `emitBlocks`, **each parent
-immediately followed by its own children** — that ordering is the contract, not
-an implementation detail. `resolveScanned` is unchanged and never expands, so a
-caller that wants one block per subject still gets exactly that.
-
-**Only `sg` expands today.** `NetworkAcl.entries` and `RouteTable.routes` sit on
-the same seam and are the obvious next two; nothing else is registered. A kind
-with no expander returns no children, so callers can use the expanded form
-unconditionally.
-
-### The fan-out is not one child per source
-
-One AWS `IpPermission` is **not** one rule resource per CIDR. From the provider
-schema (`internal/service/ec2/vpc_security_group_rule.go`), `cidr_blocks` and
-`ipv6_cidr_blocks` conflict with `source_security_group_id` and `self`, while
-`prefix_list_ids` conflicts with nothing — so every CIDR-shaped source of one
-permission belongs to a **single** resource carrying all of them, and each
-referenced security group is a resource of its own.
-`r/security_group_rule.html.markdown` documents exactly that with
-`sg-4973616163_ingress_tcp_100_121_10.1.0.0/16_2001:db8::/48_…`. A permission
-allowing three IPv4 ranges, an IPv6 range, a prefix list and one peer group is
-therefore **two** blocks, not six.
-
-### Why the emitted child type is the legacy one
-
-`aws_security_group_rule` opens with `~> **NOTE:** Avoid using the
-aws_security_group_rule resource`, recommending
-`aws_vpc_security_group_ingress_rule` / `_egress_rule` instead. Those import by
-`security_group_rule_id` — an `sgr-…` value that comes from
-`DescribeSecurityGroupRules`, a call no collector in this repo makes and a field
-the snapshot does not carry. Emitting a guessed `sgr-…` would be precisely the
-confidently-wrong block this package exists to prevent, so the legacy composite
-type — which composes exactly from fields the scan does hold — is the only
-derivable one, and every child block says so rather than leaving the reader to
-find out.
-
-Every child block also carries the provider's `!> **WARNING:**`: combining
-`aws_security_group_rule` with inline `ingress`/`egress` blocks on the
-`aws_security_group`, or with the modern rule resources, "may cause rule
-conflicts, perpetual differences, and result in rules being overwritten". That
-is the one a reader genuinely needs, because these blocks ship **adjacent to an
-`aws_security_group` block** — if the target configuration writes its rules
-inline, pasting both is the documented way to lose rules. It stays on every
-block: a `.tf` file is read with no UI around it.
-
-A self-referencing rule names its own alternative rather than guessing. AWS
-reports it as a `UserIdGroupPair` holding the group's own id, and
-`expandIPPermission` issues the same API call for `self = true` and for
-`source_security_group_id = <own id>` — a scan cannot tell which the
-configuration used, so the id reports what AWS reported and the comment says how
-to rewrite it.
-
-### Writing an expander
-
-The contract is in `ExpandedChild` in `src/types.ts`; read it first. In short:
-**never throw and never drop** (a relationship you cannot express is a child with
-`problem` set, which renders the stanza commented out — a dropped child is
-invisible, and nothing in the UI would say it was ever considered); **one
-relationship, one side**, because nothing detects a relationship registered on
-both ends; and **scanned path only** — a state file already holds these as
-first-class resources, so expanding there would emit every one of them twice.
-`src/from-state.ts` does not import `src/from-scanned.ts`, and
-`test/scanned-expand.test.ts` asserts it.
-
-Expansion is one level: there are no grandchildren, an expander sees only its own
-subject and cannot read the rest of the snapshot, and `import` blocks express no
-ordering between children.
 
 ## Coverage — terraform types (from a state file)
 
@@ -582,6 +455,232 @@ tidier than a real one. Known gaps, so nobody has to rediscover them:
 - **Non-ASCII and shell-hostile names** are escaped where decision 9 covers them
   (`\`, `"`, `${`, `%{`) and not otherwise normalised.
 
+## Adopting drift from an inventory — the scanned path
+
+**Everything above this line works from a state file and needs nothing else.
+Everything below it needs an input the command does not produce and you may not
+have.** It is kept, in full, because it is accurate and because the one consumer
+that does have that input depends on every figure in it.
+
+`resolveScanned` is for the other half of the problem: a resource that exists in
+AWS and has no state entry at all, so there are no attributes to read. You hand
+it a `ScannedSubject` and it hands back a `(type, import-id)` pair:
+
+```ts
+import { emitBlock, resolveScanned } from 'tf-import-blocks';
+
+const block = emitBlock(
+  resolveScanned({
+    kind: 'sqs-queue',
+    id: 'arn:aws:sqs:eu-west-1:111122223333:orders',
+    region: 'eu-west-1',
+    accountId: '111122223333',
+    raw: {},
+  }),
+);
+```
+
+It always answers — a kind with no rule produces a `# VERIFY` block rather than
+nothing (decision 5), so a bulk emit never silently loses a resource.
+`ResolvedImport.verified` tells you which you got.
+
+**The catch is `kind`.** It is not a terraform type and not an AWS service name;
+it is the resource vocabulary of a private AWS estate scanner this package was
+written inside (see [Design decisions](#design-decisions), decision 1), and
+nothing in this repository produces one. Two things follow:
+
+- If you are that scanner, this section is a coverage report and the numbers
+  below are the ones your details panel and bulk copy depend on.
+- If you are anyone else, this path is usable but you are supplying the
+  vocabulary yourself. `coveredKinds()` is the authoritative list from inside
+  the package — no external repository needed — and `ScannedSubject` is
+  structural (decision 2), so your own inventory records satisfy it by shape
+  with no converter. Map your records onto a covered kind and the rest works.
+  Where a type also has a state rule the two must agree exactly, and
+  `test/golden.test.ts` holds them to it.
+
+If you have a state file, use the command or `importsFromState` instead. This
+path exists because a scan has less information, not more.
+
+### Coverage — atlas kinds
+
+**136 of the 139 `kind` values the viewer can build resolve to a rule.** It is a
+different question from the terraform-type count above rather than a restatement
+of it. The two overlap in 105 types and neither contains the other: 31 rules are
+scanned-only, and the composite and attachment types that dominate a real state
+file are never drawn on a graph.
+
+That scanner is not public and the file paths below are unfollowable from here —
+they are kept because they name *where the number came from*, and a figure with
+no derivation is a figure nobody can re-check.
+
+**Derive this figure; do not count it by hand.** `kind` is assigned by four
+separate routes in the viewer's `data.ts` — the local `add()` helper, the
+`globalKinds` table, three inline `all.push` calls for `zone`, `dxgw` and `s3`,
+and the `generic` literal. A regex over `add('…')` sees only the first: it finds
+117 kinds of which all but `ecr-registry` resolve, and so reports **99.1%
+against a true 97.8%** — flattering, because two of the three unresolved kinds
+are assigned by routes it cannot see. (117 + 21 from `globalKinds` + 4 inline
+literals = 142, less the three WAF kinds the viewer builds both regionally and
+globally = 139.) The reliable method executes the builder rather than reading
+it, and so cannot miss a route:
+
+1. Fill every collection returned by `emptyRegionSnapshot()` and `emptyGlobal()`
+   with one item.
+2. Run the viewer's `buildIndex()` and take the distinct `kind` off the refs it
+   produced.
+3. Ask `ruleForKind()` about each; `coveredKinds()` is the same set from the
+   other end.
+
+Checked in both directions — `coveredKinds()` names no kind the viewer cannot
+build, so a typo in a rule's `kinds` array cannot inflate the count.
+
+#### Kinds that resolve to nothing — 3
+
+Each is deliberate. None is "we could not work it out", and all three still emit
+a block — commented out, naming the kind — so a bulk copy cannot lose the
+resource silently.
+
+| kind | why there is no rule | what to do instead |
+| --- | --- | --- |
+| `generic` | the Resource Groups Tagging API and Cloud Control sweeps (`collect/generic.ts`, `collect/cloudcontrol.ts`) merge into one collection spanning every service in the estate — the kind is a catch-all for hundreds of AWS types, so no single terraform type can be named for it | the block carries the ARN it was discovered by; read the service and resource out of that and use the rule for its real type |
+| `ecr-registry` | `r/ecr_registry.html.markdown` is a **404**: the registry is an account-level singleton and the provider has no resource for it, only configuration attached to it | its three sub-resources do import, all three by the registry id — which is your account id: `aws_ecr_registry_policy`, `aws_ecr_registry_scanning_configuration`, `aws_ecr_replication_configuration` |
+| `sso-instance` | `r/ssoadmin_instance.html.markdown` is a **404**: Identity Center instances are exposed as a **data source** only, `d/ssoadmin_instances` | reference it with `data "aws_ssoadmin_instances"` and feed its ARN into the resources that take `instance_arn` — `aws_ssoadmin_permission_set` and the two `aws_ssoadmin_*_attachment` types are covered under [terraform types](#coverage--terraform-types-from-a-state-file) |
+
+`generic` has no entry in a rule module at all; the other two are named in
+`NO_RULE_KINDS` in `rules/scanned-workload.ts`, and
+`test/scanned-workload.test.ts` asserts that list is exactly those two.
+
+#### The terraform type is chosen per resource — 8 kinds
+
+`ImportRule.type` is a constant, and for these eight it is the merge key and
+nothing else — one atlas kind covers several provider resources and a collected
+field decides which. `typeFromScanned` reads that field and is **authoritative
+including when it answers `undefined`**, at which point `from-scanned.ts` emits
+no type at all rather than the dominant one.
+
+| kind | discriminator | candidates | when it cannot tell |
+| --- | --- | --- | --- |
+| `apigw` | `protocolType` | `aws_api_gateway_rest_api` (REST), `aws_apigatewayv2_api` (HTTP, WEBSOCKET) | id survives — both import by the bare API id |
+| `apigw-vpc-link` | `version` | `aws_api_gateway_vpc_link` (v1), `aws_apigatewayv2_vpc_link` (v2) | id survives — both import by the bare link id |
+| `apigw-domain` | `endpointTypes` | `aws_api_gateway_domain_name` (EDGE, PRIVATE), `aws_apigatewayv2_domain_name` | `REGIONAL` is valid on both, so the type is unknowable; the id (the domain name) survives. With **no** `endpointTypes` at all a private domain cannot be ruled out and the id is flagged too |
+| `lb` | `lbType` | `aws_lb` (application, network, gateway), `aws_elb` (classic) | **id flagged as well** — `aws_lb` imports by ARN and `aws_elb` by name, so the variants disagree about the id, not just the type |
+| `tgw-attachment` | `resourceType` | `aws_ec2_transit_gateway_vpc_attachment`, `_peering_attachment`, `aws_ec2_transit_gateway_connect` | id survives. `vpn` and `direct-connect-gateway` attachments have no attachment resource at all — they are created by `aws_vpn_connection` and `aws_dx_gateway_association` — so they decline here and stay declined |
+| `dx-vif` | `vifType` | `aws_dx_private_virtual_interface`, `_public_`, `_transit_` | id survives — all three import by the same `dxvif-…` |
+| `fsx` | `fileSystemType` | `aws_fsx_lustre_file_system`, `_windows_`, `_ontap_`, `_openzfs_` | id survives — all four import by the same `fs-…` |
+| `datasync-location` | `locationType` | eleven `aws_datasync_location_*` types | **id flagged as well** — the eleven do not share one id form |
+
+**The type and the id fail independently, and two kinds fail the other way
+round** — type known, id not:
+
+- `apigw-domain` with `PRIVATE` resolves to `aws_api_gateway_domain_name`, but a
+  private custom domain imports by `<name>/<domain_name_id>` and `domainNameId`
+  is not collected. Real `to =`, flagged id.
+- The four FSx-backed `datasync-location` types resolve exactly, but import by
+  `<location-arn>#<fsx-arn>` and the FSx ARN is not in the snapshot
+  (`collect/datasync.ts` keeps only `SecurityGroupArns` from
+  `DescribeLocationFsx*`). Nor can it be rebuilt from `locationUri`: the doc
+  example puts the file system in a *different account*.
+
+#### Reading a commented-out block
+
+A block with no type cannot be pasted, so the emitter comments the whole stanza
+out rather than guessing at `to =`. This is what one looks like, and the comment
+above it is the whole explanation — including whether the id is still good:
+
+```hcl
+# account 111122223333 · region eu-west-1
+# VERIFY: the terraform resource type could not be determined — atlas kind "apigw-domain" covers several provider resources and the scanned fields do not identify one for this resource, so the block below is commented out. Candidates: aws_api_gateway_domain_name, aws_apigatewayv2_domain_name. The id below is right whichever of those it is
+# import {
+#   to = <replace with the terraform type and a name, e.g. aws_vpc.main>
+#   id = "dev.example.com"
+# }
+```
+
+Pick the candidate from the console or from what you know of the resource, put
+it in `to =` with a name of your choosing, and uncomment. Where the id is also
+flagged — the `lb` and `datasync-location` rows above — a second `VERIFY` line
+says so, and that one you have to look up.
+
+### Nested resources — one scanned parent, several import blocks
+
+**A scanned resource is not always one terraform resource.** The snapshot nests
+some relationships inside the resource they belong to — `SecurityGroup.ingress`
+and `.egress` are the live case — while Terraform models each as a resource of
+its own with its own import id. Nothing draws them on a graph, so they had
+nothing to hang an import block on, and the result was a half-adoption that
+looks complete: an `aws_security_group` block you can paste, and rules Terraform
+still does not manage.
+
+`resolveScannedExpanded(subject)` returns `{ parent, children }`;
+`resolveScannedManyExpanded(subjects)` flattens for `emitBlocks`, **each parent
+immediately followed by its own children** — that ordering is the contract, not
+an implementation detail. `resolveScanned` is unchanged and never expands, so a
+caller that wants one block per subject still gets exactly that.
+
+**Only `sg` expands today.** `NetworkAcl.entries` and `RouteTable.routes` sit on
+the same seam and are the obvious next two; nothing else is registered. A kind
+with no expander returns no children, so callers can use the expanded form
+unconditionally.
+
+#### The fan-out is not one child per source
+
+One AWS `IpPermission` is **not** one rule resource per CIDR. From the provider
+schema (`internal/service/ec2/vpc_security_group_rule.go`), `cidr_blocks` and
+`ipv6_cidr_blocks` conflict with `source_security_group_id` and `self`, while
+`prefix_list_ids` conflicts with nothing — so every CIDR-shaped source of one
+permission belongs to a **single** resource carrying all of them, and each
+referenced security group is a resource of its own.
+`r/security_group_rule.html.markdown` documents exactly that with
+`sg-4973616163_ingress_tcp_100_121_10.1.0.0/16_2001:db8::/48_…`. A permission
+allowing three IPv4 ranges, an IPv6 range, a prefix list and one peer group is
+therefore **two** blocks, not six.
+
+#### Why the emitted child type is the legacy one
+
+`aws_security_group_rule` opens with `~> **NOTE:** Avoid using the
+aws_security_group_rule resource`, recommending
+`aws_vpc_security_group_ingress_rule` / `_egress_rule` instead. Those import by
+`security_group_rule_id` — an `sgr-…` value that comes from
+`DescribeSecurityGroupRules`, a call no collector in this repo makes and a field
+the snapshot does not carry. Emitting a guessed `sgr-…` would be precisely the
+confidently-wrong block this package exists to prevent, so the legacy composite
+type — which composes exactly from fields the scan does hold — is the only
+derivable one, and every child block says so rather than leaving the reader to
+find out.
+
+Every child block also carries the provider's `!> **WARNING:**`: combining
+`aws_security_group_rule` with inline `ingress`/`egress` blocks on the
+`aws_security_group`, or with the modern rule resources, "may cause rule
+conflicts, perpetual differences, and result in rules being overwritten". That
+is the one a reader genuinely needs, because these blocks ship **adjacent to an
+`aws_security_group` block** — if the target configuration writes its rules
+inline, pasting both is the documented way to lose rules. It stays on every
+block: a `.tf` file is read with no UI around it.
+
+A self-referencing rule names its own alternative rather than guessing. AWS
+reports it as a `UserIdGroupPair` holding the group's own id, and
+`expandIPPermission` issues the same API call for `self = true` and for
+`source_security_group_id = <own id>` — a scan cannot tell which the
+configuration used, so the id reports what AWS reported and the comment says how
+to rewrite it.
+
+#### Writing an expander
+
+The contract is in `ExpandedChild` in `src/types.ts`; read it first. In short:
+**never throw and never drop** (a relationship you cannot express is a child with
+`problem` set, which renders the stanza commented out — a dropped child is
+invisible, and nothing in the UI would say it was ever considered); **one
+relationship, one side**, because nothing detects a relationship registered on
+both ends; and **scanned path only** — a state file already holds these as
+first-class resources, so expanding there would emit every one of them twice.
+`src/from-state.ts` does not import `src/from-scanned.ts`, and
+`test/scanned-expand.test.ts` asserts it.
+
+Expansion is one level: there are no grandchildren, an expander sees only its own
+subject and cannot read the rest of the snapshot, and `import` blocks express no
+ordering between children.
+
 ## Adding a rule
 
 1. Fetch
@@ -605,7 +704,7 @@ tidier than a real one. Known gaps, so nobody has to rediscover them:
 ## Tests
 
 ```
-npm test          # tsx --test "test/**/*.test.ts"
+npm test          # pretest builds, then tsx --test over test/**/*.test.ts
 ```
 
 `node --test` through `tsx`, with no test framework (decision 12). Two nearby
@@ -621,6 +720,11 @@ that a todo failure still exits 0 if you change it.
 | `test/scanned-network.test.ts`, `test/scanned-workload.test.ts` | every `fromScanned` resolver |
 | `test/scanned-expand.test.ts` | expansion: the fan-out rule, the provider notes, that the state path never expands, and that every declared expander survives the registry merge |
 | `test/golden.test.ts` | the whole thing, both paths, and that they agree |
+| `test/cli.test.ts` | the command, by spawning `dist/cli.js`: the same golden byte for byte on stdout, the shebang, every flag, every exit code, and that the summary never touches stdout |
+
+`test/golden-file.ts` is not a test — it is how the golden file is read, shared
+by the two tests that assert against it so the annotation rule lives in one
+place. The glob only matches `*.test.ts`, so it is never run as one.
 
 ## Design decisions
 

@@ -1,6 +1,6 @@
 {
   "name": "tf-import-blocks",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": false,
   "type": "module",
   "description": "Terraform import-block generation from a state file or from a scanned resource, driven by a per-type import-id rule table",
@@ -39,6 +39,9 @@
     },
     "./package.json": "./package.json"
   },
+  "bin": {
+    "tf-import-blocks": "./dist/cli.js"
+  },
   "files": [
     "dist",
     "src",
@@ -49,6 +52,7 @@
     "build": "tsc -p tsconfig.build.json",
     "prepare": "npm run build",
     "typecheck": "tsc -p tsconfig.json",
+    "pretest": "npm run build",
     "test": "find test -name '*.test.ts' -exec tsx --test {} +"
   },
   "devDependencies": {
