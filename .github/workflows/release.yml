@@ -23,8 +23,9 @@ jobs:
 
     permissions:
       contents: read
-      # Required for the runner to mint an OIDC token. Load bearing once a
-      # trusted publisher is configured on npmjs.com; harmless before that.
+      # Required for the runner to mint the OIDC token that authenticates the
+      # publish. This is the only credential in the workflow — remove it and
+      # the publish has no way to authenticate at all.
       id-token: write
 
     steps:
@@ -35,10 +36,12 @@ jobs:
           # Trusted publishing requires Node >= 22.14.0, so the publish job
           # does not use the gate matrix's floor of 20.
           node-version: '24'
-          # `registry-url` is what makes setup-node write the `.npmrc` that
-          # reads `NODE_AUTH_TOKEN`. Without it the secret below is silently
-          # ignored and the publish fails with `ENEEDAUTH` — which reads like a
-          # bad token and is not.
+          # Point npm at the public registry explicitly, so a publish cannot
+          # inherit some other default and then fail against a trusted
+          # publisher configured for npmjs.org. The `.npmrc` setup-node writes
+          # does reference `NODE_AUTH_TOKEN`, which is deliberately never set
+          # here; verified on 2026-08-08 that npm tolerates that variable being
+          # undefined rather than erroring on config expansion.
           registry-url: 'https://registry.npmjs.org'
           cache: npm
 
@@ -72,25 +75,32 @@ jobs:
 
       # AUTHENTICATION — read this before changing it.
       #
-      # Today this publishes with a granular access token in `NPM_TOKEN`.
-      # That is not a preference: npm cannot publish a package's *first*
-      # version over OIDC, because a trusted publisher can only be attached to
-      # a package that already exists on the registry (npm/cli#8544, open).
+      # This publishes over OIDC trusted publishing. There is no npm token in
+      # this step, no `NPM_TOKEN` secret in this repository, and there should
+      # never be one. The `id-token: write` permission granted above and the
+      # npm pinned further up are the whole mechanism.
       #
-      # Once `tf-import-blocks` exists and a trusted publisher is configured on
-      # npmjs.com, npm >= 11.5.1 prefers OIDC automatically and this file does
-      # not need to change — except for one trap. Deleting the repository
-      # secret does NOT remove the env var; it makes it an empty string, and
-      # npm treats an empty token as a token and fails rather than falling back
-      # to OIDC. So when you switch: delete the two `env:` lines below as well
-      # as the secret.
+      # Why 0.1.0 was not released by this workflow: npm cannot attach a
+      # trusted publisher to a package that does not exist on the registry yet
+      # (npm/cli#8544, open — it asks for the PyPI-style pending publisher that
+      # would close the gap). The only alternative was a bootstrap token with
+      # read and write over every package in the account, created to ship one
+      # version. So 0.1.0 was published by hand, once, behind an interactive
+      # 2FA challenge, and this workflow's first real use is the version after
+      # it.
+      #
+      # If a publish here fails with an auth error, the answer is NOT to add a
+      # secret. Check the trusted publisher on npmjs.com — the package's
+      # Settings, then Trusted Publisher — and confirm it names this repository
+      # and the workflow filename `release.yml` exactly. Adding a token would
+      # appear to fix it while quietly giving up the property that makes this
+      # safe: that nothing long-lived exists to be stolen.
       #
       # `--provenance` is deliberately absent. Trusted publishing generates
-      # provenance without the flag, and with token auth the flag additionally
-      # requires the `repository` field to match this repo case-sensitively —
-      # a mismatch fails the publish outright rather than degrading. Add it in
-      # a later release, once there is a green run to compare against.
+      # provenance attestations on its own and npm's documentation is explicit
+      # that the flag is not required, so do not add it speculatively. There
+      # are field reports of the flag being needed anyway; if a published
+      # version turns out to carry no attestation, the flag is the fix — but
+      # confirm the absence before reaching for it.
       - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish
