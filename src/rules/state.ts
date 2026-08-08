@@ -4,7 +4,8 @@
  *
  * Every `fromState` here was read off
  * `website/docs/r/<page>.html.markdown` in `hashicorp/terraform-provider-aws`
- * on `main` (fetched 2026-08-07), not recalled. `doc` records which page.
+ * on `main` (fetched 2026-08-07; the S3 family 2026-08-08), not recalled.
+ * `doc` records which page.
  *
  * **The pages now print the `identity = { … }` form first and the `id = "…"`
  * form second.** Decision 3 forbids the identity form, so every value below
@@ -347,6 +348,16 @@ const routeTableAssociation: ImportRule = {
  * `<bucket>[,<expected_bucket_owner>]` — the family of `aws_s3_bucket_*`
  * sub-resources that hang off a bucket name and take an optional owner when the
  * bucket lives in another account.
+ *
+ * **Membership of this family is per-page, not per-name.** The `aws_s3_bucket_*`
+ * types split four ways and the split cannot be read off the type name:
+ * `aws_s3_bucket_replication_configuration`, `_ownership_controls` and
+ * `_metadata_configuration` document `<bucket>` **alone** and so use `byAttr`,
+ * even though the last of the three has an `expected_bucket_owner` argument that
+ * its documented id does not use (`@IdentityAttribute("bucket")` in
+ * `s3/bucket_metadata_configuration.go` agrees with the page). Applying this
+ * constructor to a type by analogy with its neighbours is exactly the mistake
+ * decision 5 exists to stop — check the page's own `id = "…"` block.
  */
 function s3BucketSubresource(type: string, page: string): ImportRule {
   return {
@@ -360,6 +371,42 @@ function s3BucketSubresource(type: string, page: string): ImportRule {
     },
   };
 }
+
+/**
+ * `<bucket>[,<expected_bucket_owner>][,<acl>]` — the one three-part member of
+ * the S3 sub-resource family, and the one most likely to be guessed wrong.
+ *
+ * r/s3_bucket_acl documents **four** ids, not two, and picks between them on two
+ * independent conditions: whether the bucket owner differs from the provider's
+ * account, and whether the bucket carries a *canned* ACL. That yields
+ * `bucket-name`, `bucket-name,private`, `bucket-name,123456789012` and
+ * `bucket-name,123456789012,private`. State answers both conditions without
+ * inference: `expected_bucket_owner` is present only in the cross-account case,
+ * and `acl` and `access_control_policy` are mutually exclusive on the page
+ * ("either `access_control_policy` or `acl` is required"), so a non-empty `acl`
+ * *is* the canned-ACL case. The provider composes its own id the same way —
+ * `createBucketACLResourceID(bucket, expectedBucketOwner, acl)` in
+ * `internal/service/s3/bucket_acl.go` emits these four and no others.
+ *
+ * Unlike the two-part family above this takes **no `id` fallback**. The state id
+ * here is already the whole composite, so treating it as the bucket would append
+ * the owner and ACL a second time and produce a confident `b,o,a,o,a`. A missing
+ * `bucket` — impossible for a Required, ForceNew attribute — earns a `# VERIFY`.
+ */
+const s3BucketAcl: ImportRule = {
+  type: 'aws_s3_bucket_acl',
+  doc: 'r/s3_bucket_acl',
+  fromState: (a) => {
+    const bucket = str(a['bucket']);
+    if (bucket === undefined) return undefined;
+    const parts = [bucket];
+    const owner = str(a['expected_bucket_owner']);
+    if (owner !== undefined) parts.push(owner);
+    const acl = str(a['acl']);
+    if (acl !== undefined) parts.push(acl);
+    return parts.join(',');
+  },
+};
 
 /**
  * `<table_name>,<hash-key-value>[,<range-key-value>]`.
@@ -678,17 +725,73 @@ export const RULES: ImportRule[] = [
   ),
 
   // ── S3 ───────────────────────────────────────────────────────────────────
+  //
   // NOTE: aws_s3_object is deliberately absent — see the module header.
+  //
+  // The sub-resource family is grouped below by *documented id*, not by name.
+  // A real 1,049-resource state file put 127 blocks into the `# VERIFY`
+  // fallback and this family was the bulk of them, which is why it is worked
+  // through page by page rather than by pattern. The four shapes are: the
+  // bucket alone; the bucket with an optional owner; a bucket-plus-name pair;
+  // and the ACL's own three-part form. Neighbouring types do not share a shape.
+
+  // The bucket alone. Of these, only `_metadata_configuration` even has an
+  // `expected_bucket_owner` argument, and its page still documents `<bucket>`.
   byAttr('aws_s3_bucket', 'bucket', 's3_bucket'),
   byAttr('aws_s3_bucket_policy', 'bucket', 's3_bucket_policy'),
   byAttr('aws_s3_bucket_notification', 'bucket', 's3_bucket_notification'),
   byAttr('aws_s3_bucket_public_access_block', 'bucket', 's3_bucket_public_access_block'),
+  byAttr('aws_s3_bucket_ownership_controls', 'bucket', 's3_bucket_ownership_controls'),
+  byAttr('aws_s3_bucket_replication_configuration', 'bucket', 's3_bucket_replication_configuration'),
+  byAttr('aws_s3_bucket_metadata_configuration', 'bucket', 's3_bucket_metadata_configuration'),
+  // r/s3_directory_bucket: the S3 Express bucket name, `[name]--[azid]--x-s3`.
+  byAttr('aws_s3_directory_bucket', 'bucket', 's3_directory_bucket'),
+
+  // `<bucket>[,<expected_bucket_owner>]`.
   s3BucketSubresource('aws_s3_bucket_versioning', 's3_bucket_versioning'),
   s3BucketSubresource('aws_s3_bucket_lifecycle_configuration', 's3_bucket_lifecycle_configuration'),
   s3BucketSubresource(
     'aws_s3_bucket_server_side_encryption_configuration',
     's3_bucket_server_side_encryption_configuration',
   ),
+  s3BucketSubresource('aws_s3_bucket_accelerate_configuration', 's3_bucket_accelerate_configuration'),
+  s3BucketSubresource('aws_s3_bucket_cors_configuration', 's3_bucket_cors_configuration'),
+  s3BucketSubresource('aws_s3_bucket_logging', 's3_bucket_logging'),
+  s3BucketSubresource('aws_s3_bucket_object_lock_configuration', 's3_bucket_object_lock_configuration'),
+  s3BucketSubresource('aws_s3_bucket_request_payment_configuration', 's3_bucket_request_payment_configuration'),
+  s3BucketSubresource('aws_s3_bucket_website_configuration', 's3_bucket_website_configuration'),
+  s3BucketSubresource('aws_s3_bucket_abac', 's3_bucket_abac'),
+
+  // `<bucket>:<name>` — the four per-bucket *named* configurations. The pages
+  // write the second half as `bucket:analytics`, `bucket:inventory` and
+  // `bucket:metric`, but the attribute holding it is `name` on all four; only
+  // r/s3_bucket_intelligent_tiering_configuration spells the id `bucket:name`.
+  // Colon, not the comma the owner-bearing family uses.
+  byJoin('aws_s3_bucket_analytics_configuration', ':', ['bucket', 'name'], 's3_bucket_analytics_configuration'),
+  byJoin(
+    'aws_s3_bucket_intelligent_tiering_configuration',
+    ':',
+    ['bucket', 'name'],
+    's3_bucket_intelligent_tiering_configuration',
+  ),
+  byJoin('aws_s3_bucket_inventory', ':', ['bucket', 'name'], 's3_bucket_inventory'),
+  byJoin('aws_s3_bucket_metric', ':', ['bucket', 'name'], 's3_bucket_metric'),
+
+  // The ACL's four-way form, written out above.
+  s3BucketAcl,
+
+  // Account- and access-point-scoped, not bucket-scoped.
+  //
+  // r/s3_access_point documents two ids: `<account_id>:<name>` for an access
+  // point on a partition bucket, and the bare **ARN** for one on S3 on
+  // Outposts. `byId` covers both without having to tell them apart, because the
+  // state id is already whichever of the two applies:
+  // `accessPointCreateResourceID` in `internal/service/s3control/access_point.go`
+  // joins `account_id:name` for services `s3`/`s3express` and returns the ARN
+  // unchanged for `s3-outposts`, and that string is what `SetId` stores.
+  // Composing `account_id:name` here would silently mangle the Outposts case.
+  byId('aws_s3_access_point', 's3_access_point'),
+  byAttr('aws_s3_account_public_access_block', 'account_id', 's3_account_public_access_block'),
 
   // ── ECR ──────────────────────────────────────────────────────────────────
   byAttr('aws_ecr_repository', 'name', 'ecr_repository'),
@@ -815,7 +918,7 @@ export const RULES: ImportRule[] = [
 
   // ── no documented import ─────────────────────────────────────────────────
   //
-  // These four are not "we could not work it out" — the provider publishes no
+  // These five are not "we could not work it out" — the provider publishes no
   // import for them. Decision 5 still emits the block, loudly flagged, because
   // silently dropping a resource during a state move is the worse failure.
   noImport(
@@ -837,6 +940,14 @@ export const RULES: ImportRule[] = [
     'the provider publishes no import section for this type. Re-declare the ' +
       'static route in the target configuration and apply',
     'vpn_connection_route',
+  ),
+  noImport(
+    'aws_s3_object_copy',
+    'the page has no ## Import section, and no import at all: the resource ' +
+      'models a one-off CopyObject call rather than a durable object. Declare ' +
+      'the destination object in the target configuration instead — as another ' +
+      'aws_s3_object_copy if the source still exists, or as an aws_s3_object',
+    's3_object_copy',
   ),
   noImport(
     'aws_vpn_gateway_attachment',

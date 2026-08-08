@@ -253,10 +253,11 @@ Three attribute readers exist for reasons worth knowing before you write a rule:
 
 ## Coverage — terraform types (from a state file)
 
-215 terraform types: **211 resolve** and **4 carry an explicit not-importable
+234 terraform types: **229 resolve** and **5 carry an explicit not-importable
 note**. Every format was read off
 `https://raw.githubusercontent.com/hashicorp/terraform-provider-aws/main/website/docs/r/<page>.html.markdown`
-on 2026-08-07, and each rule records its page in `doc`.
+on 2026-08-07 — the S3 family on 2026-08-08 — and each rule records its page in
+`doc`.
 
 > **Re-verifying:** those pages now print the `identity = { … }` form **first**
 > and the `id = "…"` form second. This package emits the `id` form only
@@ -265,7 +266,7 @@ on 2026-08-07, and each rule records its page in `doc`.
 > Scroll past the first `import {` block or read the `terraform import` console
 > line underneath it.
 
-### Not importable — 4 types
+### Not importable — 5 types
 
 These are not "we could not work it out". The provider publishes no import for
 them. They still get a block, loudly flagged, so a state move cannot lose the
@@ -275,10 +276,11 @@ resource.
 | --- | --- | --- |
 | `aws_autoscaling_attachment` | no `## Import` section on the page at all | re-declare the attachment in the target configuration and apply — it is a pure association, so creating it again is not destructive |
 | `aws_iam_group_membership` | no `## Import` section on the page at all | `aws_iam_user_group_membership` *does* import (`user/group[/group…]`) and is the per-user replacement |
+| `aws_s3_object_copy` | no `## Import` section on the page at all — the word "import" does not appear on it | it models a one-off `CopyObject` call, not a durable object. Declare the destination in the target configuration: another `aws_s3_object_copy` if the source still exists, otherwise an `aws_s3_object` |
 | `aws_vpn_connection_route` | no `## Import` section on the page at all | re-declare the static route in the target configuration and apply |
 | `aws_vpn_gateway_attachment` | states it outright: "You cannot import this resource." | attach from the target configuration, or use `aws_vpn_gateway`'s own `vpc_id` argument |
 
-### Deliberately not registered — 1 type
+### Deliberately not registered — 2 types
 
 `aws_s3_object` has no rule **on purpose**. It is `awkward.expected.tf`'s
 no-rule case, exercising both the `# VERIFY` fallback and the `${`/quote
@@ -286,7 +288,14 @@ escaping above. Registering a rule for it — here or in either scanned rule
 module — silently invalidates a golden file that no package owns.
 `test/state-rules.test.ts` asserts it stays ruleless.
 
-### Composite ids — 68 types
+`aws_s3_bucket_object` follows it. The page documents `<bucket>/<key>`, so a rule
+would be easy, but the type is the **deprecated predecessor** of `aws_s3_object`
+and resolves to the same object through the same API. Covering the deprecated
+name while the current one is deliberately ruleless would put two S3 object types
+in the output behaving oppositely, for a reason that lives in a fixture. Both
+fall back with a `# VERIFY`, which is at least consistent and honest.
+
+### Composite ids — 83 types
 
 The ones a naive generator gets wrong. Separators are not interchangeable:
 EKS uses `:` where ECS uses `/`, Backup uses `|`, RAM uses `,`, and transit
@@ -348,6 +357,18 @@ gateway routes use `_`.
 | `aws_s3_bucket_versioning` | `<bucket>[,<expected_bucket_owner>]` |
 | `aws_s3_bucket_lifecycle_configuration` | `<bucket>[,<expected_bucket_owner>]` |
 | `aws_s3_bucket_server_side_encryption_configuration` | `<bucket>[,<expected_bucket_owner>]` |
+| `aws_s3_bucket_accelerate_configuration` | `<bucket>[,<expected_bucket_owner>]` |
+| `aws_s3_bucket_cors_configuration` | `<bucket>[,<expected_bucket_owner>]` |
+| `aws_s3_bucket_logging` | `<bucket>[,<expected_bucket_owner>]` |
+| `aws_s3_bucket_object_lock_configuration` | `<bucket>[,<expected_bucket_owner>]` |
+| `aws_s3_bucket_request_payment_configuration` | `<bucket>[,<expected_bucket_owner>]` |
+| `aws_s3_bucket_website_configuration` | `<bucket>[,<expected_bucket_owner>]` |
+| `aws_s3_bucket_abac` | `<bucket>[,<expected_bucket_owner>]` |
+| `aws_s3_bucket_acl` | `<bucket>[,<expected_bucket_owner>][,<acl>]` — **four** documented ids; see below |
+| `aws_s3_bucket_analytics_configuration` | `<bucket>:<name>` — colon, where the family above uses a comma |
+| `aws_s3_bucket_intelligent_tiering_configuration` | `<bucket>:<name>` |
+| `aws_s3_bucket_inventory` | `<bucket>:<name>` |
+| `aws_s3_bucket_metric` | `<bucket>:<name>` |
 | `aws_ecs_service` | `<cluster-name>/<service-name>` — **both halves derived**; see below |
 | `aws_eks_node_group` | `<cluster_name>:<node_group_name>` — colon, not slash |
 | `aws_eks_addon` | `<cluster_name>:<addon_name>` |
@@ -374,7 +395,33 @@ falls back to the long-form service ARN `…:service/<cluster>/<service>`. The
 pre-2019 short form `…:service/<service>` names no cluster, so it resolves to
 `undefined` and a `# VERIFY` rather than a guessed `default`.
 
-### One named attribute — 80 types
+**The S3 sub-resource family does not share one id, and the split is not
+readable from the type name.** `aws_s3_bucket_*` covers four different shapes.
+Nine types take `<bucket>[,<expected_bucket_owner>]`. Six document the
+**bucket alone** — including `aws_s3_bucket_metadata_configuration`, which *has*
+an `expected_bucket_owner` argument its documented id does not use. Four key off
+a second `name` with a **colon**. And `aws_s3_bucket_acl` has its own three-part
+form. Copying a neighbour's rule is the mistake to avoid here; read the page.
+
+`aws_s3_bucket_acl` is the one to watch. It documents **four** ids, chosen on two
+independent conditions — whether the bucket owner differs from the provider's
+account, and whether the bucket carries a *canned* ACL:
+
+| in state | import id |
+| --- | --- |
+| `bucket` | `bucket-name` |
+| `bucket`, `acl` | `bucket-name,private` |
+| `bucket`, `expected_bucket_owner` | `bucket-name,123456789012` |
+| `bucket`, `expected_bucket_owner`, `acl` | `bucket-name,123456789012,private` |
+
+State answers both conditions outright, so nothing is inferred: the page makes
+`acl` and `access_control_policy` mutually exclusive, which makes a non-empty
+`acl` exactly the canned case. The rule composes the same four strings as the
+provider's own `createBucketACLResourceID`, and takes no `id` fallback — the
+state id is already the whole composite, so reusing it as the bucket would
+double every part.
+
+### One named attribute — 85 types
 
 The import id is the documented attribute in parentheses, with the state `id` as
 a fallback.
@@ -409,9 +456,12 @@ a fallback.
 (arn), `aws_networkfirewall_firewall_policy` (arn), `aws_networkfirewall_rule_group`
 (arn), `aws_opensearch_domain` (domain_name), `aws_ram_resource_share` (arn),
 `aws_rds_cluster` (cluster_identifier), `aws_rds_cluster_instance` (identifier),
-`aws_redshift_cluster` (cluster_identifier), `aws_s3_bucket` (bucket),
-`aws_s3_bucket_notification` (bucket), `aws_s3_bucket_policy` (bucket),
-`aws_s3_bucket_public_access_block` (bucket), `aws_secretsmanager_secret` (arn),
+`aws_redshift_cluster` (cluster_identifier), `aws_s3_account_public_access_block`
+(account_id), `aws_s3_bucket` (bucket), `aws_s3_bucket_metadata_configuration`
+(bucket), `aws_s3_bucket_notification` (bucket), `aws_s3_bucket_ownership_controls`
+(bucket), `aws_s3_bucket_policy` (bucket), `aws_s3_bucket_public_access_block`
+(bucket), `aws_s3_bucket_replication_configuration` (bucket),
+`aws_s3_directory_bucket` (bucket), `aws_secretsmanager_secret` (arn),
 `aws_sfn_state_machine` (arn), `aws_sns_topic` (arn), `aws_sns_topic_subscription`
 (arn), `aws_sqs_queue` (url), `aws_sqs_queue_policy` (queue_url),
 `aws_vpc_dhcp_options_association` (vpc_id), `aws_vpc_security_group_egress_rule`
@@ -427,7 +477,7 @@ They are not the same rule.
 the rule reads `allocation_id` rather than `id`. An EC2-Classic address whose id
 is a bare public IP therefore cannot leak into the output.
 
-### Native id — 60 types
+### Native id — 61 types
 
 The AWS-native id really is the import id. Verified per type, not assumed.
 
@@ -449,10 +499,18 @@ The AWS-native id really is the import id. Verified per type, not assumed.
 `aws_organizations_organizational_unit`, `aws_organizations_policy`,
 `aws_route53_resolver_endpoint`, `aws_route53_resolver_rule`,
 `aws_route53_resolver_rule_association`, `aws_route53_zone`, `aws_route_table`,
-`aws_securityhub_account`, `aws_security_group`, `aws_subnet`,
+`aws_s3_access_point`, `aws_securityhub_account`, `aws_security_group`, `aws_subnet`,
 `aws_transfer_server`, `aws_vpc`, `aws_vpc_dhcp_options`, `aws_vpc_endpoint`,
 `aws_vpc_endpoint_service`, `aws_vpc_peering_connection`, `aws_vpn_connection`,
 `aws_vpn_gateway`.
+
+`aws_s3_access_point` is here for a reason worth stating, because it looks like a
+composite. The page documents **two** ids: `<account_id>:<name>` for an access
+point on a partition bucket, and the bare **ARN** for one on S3 on Outposts. The
+state id is already whichever applies — `accessPointCreateResourceID` joins
+`account_id:name` for services `s3`/`s3express` and returns the ARN untouched for
+`s3-outposts`. Composing `account_id:name` in the rule would look tidier and would
+silently mangle every Outposts access point.
 
 ## What a state file has that the fixture does not
 

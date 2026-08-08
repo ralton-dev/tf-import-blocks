@@ -542,6 +542,94 @@ const CASES: readonly Case[] = [
     attrs: { bucket: 'bucket-name' },
     expected: 'bucket-name',
   },
+  // The rest of the family. Each is cased at the end of the shape it belongs to
+  // so that a type moved between shapes fails here rather than in someone's
+  // plan; `the S3 sub-resource family splits by page, not by name` is the assertion
+  // that the *shapes themselves* stay apart.
+  {
+    // Owner present: the two-part form. The awkward half of the pair.
+    type: 'aws_s3_bucket_cors_configuration',
+    attrs: { bucket: 'bucket-name', expected_bucket_owner: '123456789012' },
+    expected: 'bucket-name,123456789012',
+  },
+  { type: 'aws_s3_bucket_website_configuration', attrs: { bucket: 'bucket-name' }, expected: 'bucket-name' },
+  {
+    type: 'aws_s3_bucket_logging',
+    attrs: { bucket: 'bucket-name', expected_bucket_owner: '123456789012' },
+    expected: 'bucket-name,123456789012',
+  },
+  { type: 'aws_s3_bucket_accelerate_configuration', attrs: { bucket: 'bucket-name' }, expected: 'bucket-name' },
+  {
+    type: 'aws_s3_bucket_object_lock_configuration',
+    attrs: { bucket: 'bucket-name', expected_bucket_owner: '123456789012' },
+    expected: 'bucket-name,123456789012',
+  },
+  {
+    type: 'aws_s3_bucket_request_payment_configuration',
+    attrs: { bucket: 'bucket-name' },
+    expected: 'bucket-name',
+  },
+  {
+    type: 'aws_s3_bucket_abac',
+    attrs: { bucket: 'bucket-name', expected_bucket_owner: '123456789012' },
+    expected: 'bucket-name,123456789012',
+  },
+  {
+    // Bucket alone even with an owner in state: r/s3_bucket_metadata_configuration
+    // documents `<bucket>`, and the owner is an argument its id does not use.
+    // Reading this rule as a member of the family above is the live trap.
+    type: 'aws_s3_bucket_metadata_configuration',
+    attrs: { bucket: 'bucket-name', expected_bucket_owner: '123456789012' },
+    expected: 'bucket-name',
+  },
+  { type: 'aws_s3_bucket_ownership_controls', attrs: { bucket: 'my-bucket' }, expected: 'my-bucket' },
+  { type: 'aws_s3_bucket_replication_configuration', attrs: { bucket: 'bucket-name' }, expected: 'bucket-name' },
+  {
+    type: 'aws_s3_directory_bucket',
+    attrs: { id: 'example--usw2-az1--x-s3', bucket: 'example--usw2-az1--x-s3' },
+    expected: 'example--usw2-az1--x-s3',
+  },
+  // `<bucket>:<name>` — colon, and the second half is `name` on all four even
+  // where the page writes it as `bucket:analytics` / `:inventory` / `:metric`.
+  {
+    type: 'aws_s3_bucket_analytics_configuration',
+    attrs: { bucket: 'my-bucket', name: 'EntireBucket' },
+    expected: 'my-bucket:EntireBucket',
+  },
+  {
+    type: 'aws_s3_bucket_intelligent_tiering_configuration',
+    attrs: { bucket: 'my-bucket', name: 'EntireBucket' },
+    expected: 'my-bucket:EntireBucket',
+  },
+  {
+    type: 'aws_s3_bucket_inventory',
+    attrs: { bucket: 'my-bucket', name: 'EntireBucket' },
+    expected: 'my-bucket:EntireBucket',
+  },
+  {
+    type: 'aws_s3_bucket_metric',
+    attrs: { bucket: 'my-bucket', name: 'EntireBucket' },
+    expected: 'my-bucket:EntireBucket',
+  },
+  {
+    // The three-part form: cross-account *and* canned. All four combinations
+    // are pinned in `an S3 bucket ACL picks between four documented ids`.
+    type: 'aws_s3_bucket_acl',
+    attrs: { bucket: 'bucket-name', expected_bucket_owner: '123456789012', acl: 'private' },
+    expected: 'bucket-name,123456789012,private',
+  },
+  {
+    // The partition form. The Outposts form is a whole ARN and is pinned in
+    // `an S3 access point carries whichever of its two ids applies`.
+    type: 'aws_s3_access_point',
+    attrs: { id: '123456789012:example', account_id: '123456789012', name: 'example' },
+    expected: '123456789012:example',
+  },
+  {
+    type: 'aws_s3_account_public_access_block',
+    attrs: { id: '123456789012', account_id: '123456789012' },
+    expected: '123456789012',
+  },
 
   // ── ECR ──────────────────────────────────────────────────────────────────
   { type: 'aws_ecr_repository', attrs: { id: 'test-service', name: 'test-service' }, expected: 'test-service' },
@@ -846,6 +934,7 @@ const CASES: readonly Case[] = [
 const NOT_IMPORTABLE: readonly string[] = [
   'aws_autoscaling_attachment',
   'aws_iam_group_membership',
+  'aws_s3_object_copy',
   'aws_vpn_connection_route',
   'aws_vpn_gateway_attachment',
 ];
@@ -1015,6 +1104,101 @@ test('not-importable types are flagged, not left to the generic fallback', () =>
     assert.equal(resolved.verified, false);
     assert.ok(resolved.comments.some((c) => c.startsWith(`NOT IMPORTABLE: ${type} —`)));
   }
+});
+
+test('an S3 bucket ACL picks between four documented ids', () => {
+  const rule = ruleForType('aws_s3_bucket_acl')?.fromState;
+  assert.ok(rule !== undefined);
+  // r/s3_bucket_acl, in the order the page presents them. Same account and no
+  // canned ACL; same account and canned; cross-account and not canned;
+  // cross-account and canned. Emitting the two-part owner form for a bucket
+  // that carries a canned ACL imports an ACL the configuration does not
+  // describe, which is the failure this whole package is built to avoid.
+  assert.equal(rule({ bucket: 'bucket-name' }), 'bucket-name');
+  assert.equal(rule({ bucket: 'bucket-name', acl: 'private' }), 'bucket-name,private');
+  assert.equal(rule({ bucket: 'bucket-name', expected_bucket_owner: '123456789012' }), 'bucket-name,123456789012');
+  assert.equal(
+    rule({ bucket: 'bucket-name', expected_bucket_owner: '123456789012', acl: 'private' }),
+    'bucket-name,123456789012,private',
+  );
+
+  // A grant-based ACL sets `access_control_policy` instead of `acl` — the page
+  // makes them mutually exclusive — so there is no third part to append.
+  assert.equal(
+    rule({ bucket: 'bucket-name', acl: '', access_control_policy: [{ grant: [] }] }),
+    'bucket-name',
+  );
+
+  // No `id` fallback, unlike the two-part family: the state id is already the
+  // whole composite, so reusing it as the bucket would double every part.
+  assert.equal(rule({ id: 'bucket-name,123456789012,private', expected_bucket_owner: '123456789012' }), undefined);
+});
+
+test('the S3 sub-resource family splits by page, not by name', () => {
+  // The family is not one rule. Reading a type's shape off its neighbours is
+  // the mistake this pins: all of these are `aws_s3_bucket_*`, all of them are
+  // handed the same cross-account attributes, and they must not agree.
+  const attrs: StateAttributes = { bucket: 'bucket-name', expected_bucket_owner: '123456789012', name: 'EntireBucket' };
+  const idOf = (type: string): string | undefined => ruleForType(type)?.fromState?.(attrs);
+
+  // Takes the owner (r/s3_bucket_cors_configuration and siblings).
+  for (const type of [
+    'aws_s3_bucket_versioning',
+    'aws_s3_bucket_lifecycle_configuration',
+    'aws_s3_bucket_server_side_encryption_configuration',
+    'aws_s3_bucket_accelerate_configuration',
+    'aws_s3_bucket_cors_configuration',
+    'aws_s3_bucket_logging',
+    'aws_s3_bucket_object_lock_configuration',
+    'aws_s3_bucket_request_payment_configuration',
+    'aws_s3_bucket_website_configuration',
+    'aws_s3_bucket_abac',
+  ]) {
+    assert.equal(idOf(type), 'bucket-name,123456789012', type);
+  }
+
+  // Documents the bucket alone, owner attribute or not.
+  for (const type of [
+    'aws_s3_bucket_policy',
+    'aws_s3_bucket_notification',
+    'aws_s3_bucket_public_access_block',
+    'aws_s3_bucket_ownership_controls',
+    'aws_s3_bucket_replication_configuration',
+    'aws_s3_bucket_metadata_configuration',
+  ]) {
+    assert.equal(idOf(type), 'bucket-name', type);
+  }
+
+  // Keys off a second name, with a colon rather than the family's comma.
+  for (const type of [
+    'aws_s3_bucket_analytics_configuration',
+    'aws_s3_bucket_intelligent_tiering_configuration',
+    'aws_s3_bucket_inventory',
+    'aws_s3_bucket_metric',
+  ]) {
+    assert.equal(idOf(type), 'bucket-name:EntireBucket', type);
+  }
+
+  // The bucket-and-name four compose strictly: a configuration with no name
+  // cannot be addressed at all, so it earns a `# VERIFY` rather than the bare
+  // bucket, which would import a different resource's configuration.
+  assert.equal(ruleForType('aws_s3_bucket_metric')?.fromState?.({ bucket: 'bucket-name' }), undefined);
+});
+
+test('an S3 access point carries whichever of its two ids applies', () => {
+  const rule = ruleForType('aws_s3_access_point')?.fromState;
+  assert.ok(rule !== undefined);
+  // r/s3_access_point documents `<account_id>:<name>` for a partition bucket
+  // and the bare ARN for S3 on Outposts. `accessPointCreateResourceID` stores
+  // whichever applies as the state id, so both survive untouched — and an
+  // Outposts point must not be rebuilt as `account:name`, which would not parse
+  // back to the ARN the provider expects.
+  assert.equal(
+    rule({ id: '123456789012:example', account_id: '123456789012', name: 'example' }),
+    '123456789012:example',
+  );
+  const outposts = 'arn:aws:s3-outposts:us-east-1:123456789012:outpost/op-1234567890123456/accesspoint/example';
+  assert.equal(rule({ id: outposts, account_id: '123456789012', name: outposts, arn: outposts }), outposts);
 });
 
 test('aws_s3_object stays ruleless — the golden file depends on it', () => {

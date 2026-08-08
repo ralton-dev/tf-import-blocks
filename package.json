@@ -1,6 +1,6 @@
 {
   "name": "tf-import-blocks",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": false,
   "type": "module",
   "description": "Terraform import-block generation from a state file or from a scanned resource, driven by a per-type import-id rule table",
