@@ -33,6 +33,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
+          check-latest: true
           # Trusted publishing requires Node >= 22.14.0, so the publish job
           # uses the gate matrix's current LTS rather than its floor of 22.
           node-version: '24'
