@@ -34,7 +34,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           # Trusted publishing requires Node >= 22.14.0, so the publish job
-          # does not use the gate matrix's floor of 20.
+          # uses the gate matrix's current LTS rather than its floor of 22.
           node-version: '24'
           # Point npm at the public registry explicitly, so a publish cannot
           # inherit some other default and then fail against a trusted

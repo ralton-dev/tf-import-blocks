@@ -24,10 +24,10 @@ jobs:
       # are different findings, and cancelling one hides which you have.
       fail-fast: false
       matrix:
-        # The floor declared in `engines`, and the current Active LTS. Testing
-        # the floor is the point — nothing else in this repo checks that the
-        # package actually runs on the oldest Node it advertises support for.
-        node: ['20', '24']
+        # The oldest maintained LTS and the current Active LTS. Keep CI on
+        # runtimes that receive security fixes; consumers may still use the
+        # older compatibility floor declared in `engines`.
+        node: ['22', '24']
 
     steps:
       - uses: actions/checkout@v6
