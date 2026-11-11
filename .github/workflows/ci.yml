@@ -20,14 +20,12 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
-      # Report both versions. A failure on the floor and a failure on current
-      # are different findings, and cancelling one hides which you have.
       fail-fast: false
       matrix:
-        # The oldest maintained LTS and the current Active LTS. Keep CI on
-        # runtimes that receive security fixes; consumers may still use the
-        # older compatibility floor declared in `engines`.
-        node: ['22', '24']
+        # The floor declared in `engines`, which is also the current Active
+        # LTS. Kept as a matrix so the check keeps the name `Node <version>`
+        # and a second runtime is a one-word change.
+        node: ['26']
 
     steps:
       - uses: actions/checkout@v6

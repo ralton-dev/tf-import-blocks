@@ -116,7 +116,7 @@ npm install -g tf-import-blocks   # the command, on your PATH
 npm install tf-import-blocks      # the library, in a project
 ```
 
-ESM only, Node 20 or newer, **no runtime dependencies** — not for the library
+ESM only, Node 26 or newer, **no runtime dependencies** — not for the library
 and not for the command, which parses its own arguments with `node:util`.
 TypeScript declarations ship with the package; there is no `@types/` to install.
 

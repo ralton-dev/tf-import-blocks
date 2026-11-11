@@ -27,7 +27,7 @@
     "url": "https://github.com/ralton-dev/tf-import-blocks/issues"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=26"
   },
   "publishConfig": {
     "access": "public"
@@ -56,7 +56,7 @@
     "test": "find test -name '*.test.ts' -exec tsx --test {} +"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
+    "@types/node": "^26.6.6",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

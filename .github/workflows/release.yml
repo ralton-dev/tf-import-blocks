@@ -34,9 +34,9 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           check-latest: true
-          # Trusted publishing requires Node >= 22.14.0, so the publish job
-          # uses the gate matrix's current LTS rather than its floor of 22.
-          node-version: '24'
+          # Trusted publishing requires Node >= 22.14.0; the gate's Node 26
+          # is well past it.
+          node-version: '26'
           # Point npm at the public registry explicitly, so a publish cannot
           # inherit some other default and then fail against a trusted
           # publisher configured for npmjs.org. The `.npmrc` setup-node writes
